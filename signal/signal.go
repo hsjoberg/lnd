@@ -39,6 +39,11 @@ func Intercept() error {
 		return errors.New("intercept already started")
 	}
 
+	shutdownChannel = make(chan struct{})
+	shutdownRequestChannel = make(chan struct{})
+	quit = make(chan struct{})
+	interruptChannel = make(chan os.Signal, 1)
+
 	signalsToCatch := []os.Signal{
 		os.Interrupt,
 		os.Kill,
@@ -93,6 +98,7 @@ func mainInterruptHandler() {
 		case <-quit:
 			log.Infof("Gracefully shutting down.")
 			close(shutdownChannel)
+			atomic.StoreInt32(&started, 0)
 			return
 		}
 	}
