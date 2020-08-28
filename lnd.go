@@ -366,6 +366,7 @@ func Main(cfg *Config, lisCfg ListenerCfg, shutdownChan <-chan struct{}) error {
 	// We wait until the user provides a password over RPC. In case lnd is
 	// started with the --noseedbackup flag, we use the default password
 	// for wallet encryption.
+	loader := &wallet.Loader{}
 	if !cfg.NoSeedBackup {
 		params, err := waitForWalletPassword(
 			cfg, cfg.RESTListeners, serverOpts, restDialOpts,
@@ -382,6 +383,8 @@ func Main(cfg *Config, lisCfg ListenerCfg, shutdownChan <-chan struct{}) error {
 		privateWalletPw = walletInitParams.Password
 		publicWalletPw = walletInitParams.Password
 
+		loader = params.Loader
+		
 		if walletInitParams.RecoveryWindow > 0 {
 			ltndLog.Infof("Wallet recovery mode enabled with "+
 				"address lookahead of %d addresses",
@@ -740,6 +743,7 @@ func Main(cfg *Config, lisCfg ListenerCfg, shutdownChan <-chan struct{}) error {
 	// Wait for shutdown signal from either a graceful server stop or from
 	// the interrupt handler.
 	<-shutdownChan
+	loader.UnloadWallet()
 	return nil
 }
 
@@ -938,6 +942,8 @@ type WalletUnlockParams struct {
 	// ChansToRestore a set of static channel backups that should be
 	// restored before the main server instance starts up.
 	ChansToRestore walletunlocker.ChannelsToRecover
+
+	Loader *wallet.Loader
 }
 
 // waitForWalletPassword will spin up gRPC and REST endpoints for the
@@ -1099,6 +1105,7 @@ func waitForWalletPassword(cfg *Config, restEndpoints []net.Addr,
 			RecoveryWindow: recoveryWindow,
 			Wallet:         newWallet,
 			ChansToRestore: initMsg.ChanBackups,
+			Loader:         initMsg.Loader,
 		}, nil
 
 	// The wallet has already been created in the past, and is simply being
@@ -1109,6 +1116,7 @@ func waitForWalletPassword(cfg *Config, restEndpoints []net.Addr,
 			RecoveryWindow: unlockMsg.RecoveryWindow,
 			Wallet:         unlockMsg.Wallet,
 			ChansToRestore: unlockMsg.ChanBackups,
+			Loader:         unlockMsg.Loader,
 		}, nil
 
 	case <-signal.ShutdownChannel():

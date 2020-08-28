@@ -54,6 +54,8 @@ type WalletInitMsg struct {
 	// ChanBackups a set of static channel backups that should be received
 	// after the wallet has been initialized.
 	ChanBackups ChannelsToRecover
+
+	Loader *wallet.Loader
 }
 
 // WalletUnlockMsg is a message sent by the UnlockerService when a user wishes
@@ -81,6 +83,8 @@ type WalletUnlockMsg struct {
 	// ChanBackups a set of static channel backups that should be received
 	// after the wallet has been unlocked.
 	ChanBackups ChannelsToRecover
+
+	Loader *wallet.Loader
 }
 
 // UnlockerService implements the WalletUnlocker service used to provide lnd
@@ -346,6 +350,7 @@ func (u *UnlockerService) UnlockWallet(ctx context.Context,
 		Passphrase:     password,
 		RecoveryWindow: recoveryWindow,
 		Wallet:         unlockedWallet,
+		Loader:         loader,
 	}
 
 	// Before we return the unlock payload, we'll check if we can extract

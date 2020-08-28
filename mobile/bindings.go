@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	flags "github.com/jessevdk/go-flags"
 	"github.com/lightningnetwork/lnd"
 	"github.com/lightningnetwork/lnd/signal"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/test/bufconn"
 )
 
 // Start starts lnd in a new goroutine.
@@ -26,6 +29,12 @@ import (
 // current app directory in order to ensure lnd has the permissions needed to
 // write to it.
 func Start(extraArgs string, unlockerReady, rpcReady Callback) {
+	lightningLis = bufconn.Listen(1000)
+	lightningLisDialOptions = []grpc.DialOption{}
+	lightningLisOptionsMtx = sync.Mutex{}
+
+	walletUnlockerLis = bufconn.Listen(1000)
+
 	// Split the argument string on "--" to get separated command line
 	// arguments.
 	var splitArgs []string
