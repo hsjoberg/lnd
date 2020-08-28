@@ -13,31 +13,38 @@ import (
 	"syscall"
 )
 
-var (
+type Channels struct {
 	// interruptChannel is used to receive SIGINT (Ctrl+C) signals.
-	interruptChannel = make(chan os.Signal, 1)
+	interruptChannel chan os.Signal
 
 	// shutdownRequestChannel is used to request the daemon to shutdown
 	// gracefully, similar to when receiving SIGINT.
-	shutdownRequestChannel = make(chan struct{})
+	shutdownRequestChannel chan struct{}
 
 	// started indicates whether we have started our main interrupt handler.
 	// This field should be used atomically.
 	started int32
 
 	// quit is closed when instructing the main interrupt handler to exit.
-	quit = make(chan struct{})
+	quit chan struct{}
 
 	// shutdownChannel is closed once the main interrupt handler exits.
-	shutdownChannel = make(chan struct{})
-)
+	shutdownChannel chan struct{}
+}
+
+var channels Channels
 
 // Intercept starts the interception of interrupt signals. Note that this
 // function can only be called once.
 func Intercept() error {
-	if !atomic.CompareAndSwapInt32(&started, 0, 1) {
+	if !atomic.CompareAndSwapInt32(&channels.started, 0, 1) {
 		return errors.New("intercept already started")
 	}
+
+	channels.interruptChannel = make(chan os.Signal, 1)
+	channels.shutdownRequestChannel = make(chan struct{})
+	channels.quit = make(chan struct{})
+	channels.shutdownChannel = make(chan struct{})
 
 	signalsToCatch := []os.Signal{
 		os.Interrupt,
@@ -46,7 +53,7 @@ func Intercept() error {
 		syscall.SIGTERM,
 		syscall.SIGQUIT,
 	}
-	signal.Notify(interruptChannel, signalsToCatch...)
+	signal.Notify(channels.interruptChannel, signalsToCatch...)
 	go mainInterruptHandler()
 
 	return nil
@@ -77,22 +84,23 @@ func mainInterruptHandler() {
 
 		// Signal the main interrupt handler to exit, and stop accept
 		// post-facto requests.
-		close(quit)
+		close(channels.quit)
 	}
 
 	for {
 		select {
-		case signal := <-interruptChannel:
+		case signal := <-channels.interruptChannel:
 			log.Infof("Received %v", signal)
 			shutdown()
 
-		case <-shutdownRequestChannel:
+		case <-channels.shutdownRequestChannel:
 			log.Infof("Received shutdown request.")
 			shutdown()
 
-		case <-quit:
+		case <-channels.quit:
 			log.Infof("Gracefully shutting down.")
-			close(shutdownChannel)
+			close(channels.shutdownChannel)
+			atomic.StoreInt32(&channels.started, 0)
 			return
 		}
 	}
@@ -103,7 +111,7 @@ func mainInterruptHandler() {
 func Listening() bool {
 	// If our started field is not set, we are not yet listening for
 	// interrupts.
-	if atomic.LoadInt32(&started) != 1 {
+	if atomic.LoadInt32(&channels.started) != 1 {
 		return false
 	}
 
@@ -115,7 +123,7 @@ func Listening() bool {
 // Alive returns true if the main interrupt handler has not been killed.
 func Alive() bool {
 	select {
-	case <-quit:
+	case <-channels.quit:
 		return false
 	default:
 		return true
@@ -125,13 +133,13 @@ func Alive() bool {
 // RequestShutdown initiates a graceful shutdown from the application.
 func RequestShutdown() {
 	select {
-	case shutdownRequestChannel <- struct{}{}:
-	case <-quit:
+	case channels.shutdownRequestChannel <- struct{}{}:
+	case <-channels.quit:
 	}
 }
 
 // ShutdownChannel returns the channel that will be closed once the main
 // interrupt handler has exited.
 func ShutdownChannel() <-chan struct{} {
-	return shutdownChannel
+	return channels.shutdownChannel
 }
