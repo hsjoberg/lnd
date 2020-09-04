@@ -156,3 +156,11 @@ func Start(extraArgs string, rpcReady Callback) {
 		rpcReady.OnResponse([]byte{})
 	}()
 }
+
+type LndStatusCallback interface {
+	OnResponse(lndStarted int32)
+}
+
+func GetStatus(callback LndStatusCallback) {
+	callback.OnResponse(lndStarted)
+}
