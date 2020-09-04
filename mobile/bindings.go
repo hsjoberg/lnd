@@ -12,6 +12,23 @@ import (
 	"github.com/lightningnetwork/lnd/signal"
 )
 
+// LndStatus holds the current status of lnd.
+type LndStatus struct {
+	// lndStarted tells whether the lnd is started or not.
+	lndStarted     bool
+	// walletUnlocked tells whether the internal wallet is unlocked or not.
+	walletUnlocked bool
+}
+
+var lndStatus = LndStatus{
+	lndStarted:     false,
+	walletUnlocked: false,
+}
+
+type LndStatusCallback interface {
+	OnResponse(lndStarted bool, walletUnlocked bool)
+}
+
 // Start starts lnd in a new goroutine.
 //
 // extraArgs can be used to pass command line arguments to lnd that will
@@ -99,6 +116,8 @@ func Start(extraArgs string, unlockerReady, rpcReady Callback) {
 	go func() {
 		<-unlockerListening
 
+		lndStatus.lndStarted = true
+
 		// We must set the TLS certificates in order to properly
 		// authenticate with the wallet unlocker service.
 		auth, err := lnd.WalletUnlockerAuthOptions(loadedConfig)
@@ -116,6 +135,8 @@ func Start(extraArgs string, unlockerReady, rpcReady Callback) {
 	go func() {
 		<-rpcListening
 
+		lndStatus.walletUnlocked = true
+
 		// Now that the RPC server is ready, we can get the needed
 		// authentication options, and add them to the global dial
 		// options.
@@ -130,4 +151,15 @@ func Start(extraArgs string, unlockerReady, rpcReady Callback) {
 
 		rpcReady.OnResponse([]byte{})
 	}()
+
+	go func() {
+		<-signal.ShutdownChannel()
+
+		lndStatus.lndStarted = false
+		lndStatus.walletUnlocked = false
+	}()
+}
+
+func GetStatus(callback LndStatusCallback) {
+	callback.OnResponse(lndStatus.lndStarted, lndStatus.walletUnlocked)
 }
