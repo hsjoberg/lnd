@@ -1510,6 +1510,9 @@ message Channel {
 
     // This is the confirmed / on-chain zero-conf SCID.
     uint64 zero_conf_confirmed_scid = 33;
+
+    // This is the peer SCID alias.
+    uint64 peer_scid_alias = 34 [jstype = JS_STRING];
 }
 
 message ListChannelsRequest {
