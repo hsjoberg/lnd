@@ -3484,6 +3484,11 @@
           "type": "string",
           "format": "uint64",
           "description": "This is the confirmed / on-chain zero-conf SCID."
+        },
+        "peer_scid_alias": {
+          "type": "string",
+          "format": "uint64",
+          "description": "This is the peer SCID alias."
         }
       }
     },
