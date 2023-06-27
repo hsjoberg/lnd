@@ -50,7 +50,7 @@ require (
 	github.com/stretchr/testify v1.8.1
 	github.com/tv42/zbase32 v0.0.0-20160707012821-501572607d02
 	github.com/urfave/cli v1.22.9
-	go.etcd.io/bbolt v1.3.6
+	go.etcd.io/bbolt v1.3.7
 	go.etcd.io/etcd/client/pkg/v3 v3.5.7
 	go.etcd.io/etcd/client/v3 v3.5.7
 	golang.org/x/crypto v0.7.0
@@ -188,6 +188,8 @@ replace github.com/breez/breez => github.com/djkazic/breez v0.0.8
 replace github.com/btcsuite/btcwallet => github.com/djkazic/btcwallet v1.5.7
 
 replace github.com/btcsuite/btcwallet/walletdb => github.com/djkazic/btcwallet/walletdb v1.5.7
+
+replace github.com/lightningnetwork/lnd/kvdb => ./kvdb
 
 // If you change this please also update .github/pull_request_template.md and
 // docs/INSTALL.md.
