@@ -1,7 +1,9 @@
 package lndmobile
 
 import (
+	"bufio"
 	"compress/gzip"
+	"crypto/md5"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -233,20 +235,14 @@ func fileExists(filename string) bool {
 
 func GossipSync(cacheDir string, dataDir string, networkType string, callback Callback) {
 	var (
-		firstRun  bool
-		useDGraph bool
+		firstRun      bool
+		useDGraph     bool
+		dgraphPath    = cacheDir + "/dgraph/channel.db"
+		breezURL      = "https://maps.eldamar.icu/mainnet/graph/graph-001d.db"
+		checksumURL   = "https://maps.eldamar.icu/mainnet/graph/MD5SUMS"
+		checksumValue string
 	)
-	dgraphPath := cacheDir + "/dgraph/channel.db"
-	info, err := os.Stat(dgraphPath)
-	if err == nil {
-		modifiedTime := info.ModTime()
-		now := time.Now()
-		diff := now.Sub(modifiedTime)
-		if diff.Hours() <= 24 {
-			useDGraph = true
-		}
-	}
-	// Check lastRun info
+	// check lastRun time, return early if we ran too recently
 	lastRunPath := cacheDir + "/lastrun"
 	if !fileExists(lastRunPath) {
 		os.Create(lastRunPath)
@@ -258,15 +254,90 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 		now := time.Now()
 		diff := now.Sub(modifiedTime)
 		if !firstRun && diff.Hours() <= 24 {
-			// Abort
+			// this is not the first run and
+			// we have run speedloader within the last 24h, abort
 			callback.OnResponse([]byte("skip_time_constraint"))
 			return
 		}
 	}
-
-	if !useDGraph && networkType == "wifi" {
-		// Download the breez gossip database
-		breezURL := "https://maps.eldamar.icu/mainnet/graph/graph-001d.db"
+	// checksum fetching
+	client := new(http.Client)
+	req, err := http.NewRequest("GET", checksumURL, nil)
+	if err != nil {
+		callback.OnError(err)
+		return
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		callback.OnError(err)
+		return
+	}
+	defer resp.Body.Close()
+	reader := bufio.NewReader(resp.Body)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			} else {
+				callback.OnError(err)
+				return
+			}
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			callback.OnError(errors.New("unexpected_checksum_line_fmt"))
+			return
+		}
+		filename := fields[1]
+		hash := fields[0]
+		if filename == "graph-001d.db" {
+			checksumValue = hash
+		}
+	}
+	if checksumValue != "" {
+		// we have a valid checksum
+		fh, openErr := os.Open(dgraphPath)
+		// do we have a file?
+		if !os.IsNotExist(openErr) {
+			// first, calculate the md5sum of the file we have
+			defer fh.Close()
+			md5h := md5.New()
+			_, err = io.Copy(md5h, fh)
+			if err != nil {
+				callback.OnError(err)
+				return
+			}
+			sum := md5h.Sum(nil)
+			calculatedChecksum := hex.EncodeToString(sum)
+			if checksumValue != calculatedChecksum {
+				// failed checksum check (existing file)
+				// unconditionally try to delete dgraph file and lastRun
+				os.Remove(dgraphPath)
+				os.Remove(lastRunPath)
+			} else {
+				// checksum matches
+				// now check modtime
+				info, err := os.Stat(dgraphPath)
+				// check the modified time on the existing downloaded channel.db, see if it is <= 48h old
+				if err == nil {
+					modifiedTime := info.ModTime()
+					now := time.Now()
+					diff := now.Sub(modifiedTime)
+					if diff.Hours() <= 48 {
+						// abort downloading the graph, we have a fresh-enough downloaded graph
+						useDGraph = true
+					}
+				}
+			}
+		}
+	}
+	if networkType != "wifi" && networkType != "ethernet" {
+		useDGraph = true
+	}
+	// if the dgraph is not usable
+	if !useDGraph {
+		// download the breez gossip database
 		os.MkdirAll(cacheDir+"/dgraph", 0777)
 		out, err := os.Create(dgraphPath)
 		if err != nil {
@@ -305,9 +376,30 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 		}
 		out.Close()
 		resp.Body.Close()
+		fh, err := os.Open(dgraphPath)
+		if err != nil {
+			callback.OnError(err)
+			return
+		}
+		defer fh.Close()
+		md5h := md5.New()
+		_, err = io.Copy(md5h, fh)
+		if err != nil {
+			callback.OnError(err)
+			return
+		}
+		sum := md5h.Sum(nil)
+		calculatedChecksum := hex.EncodeToString(sum)
+		if checksumValue != calculatedChecksum {
+			// failed checksum check (just downloaded file)
+			// unconditionally remove dgraph file and lastRun
+			os.Remove(dgraphPath)
+			os.Remove(lastRunPath)
+			callback.OnResponse([]byte("skip_checksum_failed"))
+			return
+		}
 	}
-
-	// Open channel.db as dest
+	// open channel.db as dest
 	service, release, err := serviceRefCounter.Get(
 		func() (interface{}, refcount.ReleaseFunc, error) {
 			return newService(dataDir)
@@ -319,8 +411,7 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 	}
 	defer release()
 	destDB := service.(*channeldb.DB)
-
-	// Open dgraph.db as source
+	// open dgraph.db as source
 	dchanDB, err := channeldb.Open(cacheDir + "/dgraph")
 	if err != nil {
 		callback.OnError(err)
@@ -332,7 +423,6 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 		callback.OnError(err)
 		return
 	}
-
 	// utility function to convert bolts key to a string path.
 	extractPathElements := func(bytesPath [][]byte, key []byte) []string {
 		var path []string
@@ -392,7 +482,7 @@ func GossipSync(cacheDir string, dataDir string, networkType string, callback Ca
 		callback.OnError(err)
 		return
 	}
-	// Update the lastrun modified time
+	// update the lastrun modified time
 	now := time.Now()
 	err = os.Chtimes(lastRunPath, now, now)
 	if err != nil {
