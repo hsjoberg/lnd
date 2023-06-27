@@ -104,9 +104,6 @@ github.com/btcsuite/btcwallet/wallet/txrules v1.2.0/go.mod h1:AtkqiL7ccKWxuLYtZm
 github.com/btcsuite/btcwallet/wallet/txsizes v1.2.2/go.mod h1:q08Rms52VyWyXcp5zDc4tdFRKkFgNsMQrv3/LvE1448=
 github.com/btcsuite/btcwallet/wallet/txsizes v1.2.3 h1:PszOub7iXVYbtGybym5TGCp9Dv1h1iX4rIC3HICZGLg=
 github.com/btcsuite/btcwallet/wallet/txsizes v1.2.3/go.mod h1:q08Rms52VyWyXcp5zDc4tdFRKkFgNsMQrv3/LvE1448=
-github.com/btcsuite/btcwallet/walletdb v1.3.5/go.mod h1:oJDxAEUHVtnmIIBaa22wSBPTVcs6hUp5NKWmI8xDwwU=
-github.com/btcsuite/btcwallet/walletdb v1.4.0 h1:/C5JRF+dTuE2CNMCO/or5N8epsrhmSM4710uBQoYPTQ=
-github.com/btcsuite/btcwallet/walletdb v1.4.0/go.mod h1:oJDxAEUHVtnmIIBaa22wSBPTVcs6hUp5NKWmI8xDwwU=
 github.com/btcsuite/btcwallet/wtxmgr v1.5.0 h1:WO0KyN4l6H3JWnlFxfGR7r3gDnlGT7W2cL8vl6av4SU=
 github.com/btcsuite/btcwallet/wtxmgr v1.5.0/go.mod h1:TQVDhFxseiGtZwEPvLgtfyxuNUDsIdaJdshvWzR0HJ4=
 github.com/btcsuite/go-socks v0.0.0-20170105172521-4720035b7bfd h1:R/opQEbFEy9JGkIguV40SvRY1uliPX8ifOvi6ICsFCw=
@@ -172,6 +169,10 @@ github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1/go.mod h1:hyedUtir6IdtD/7lIxGeC
 github.com/decred/dcrd/lru v1.0.0 h1:Kbsb1SFDsIlaupWPwsPp+dkxiBY1frcS07PCPgotKz8=
 github.com/decred/dcrd/lru v1.0.0/go.mod h1:mxKOwFd7lFjN2GZYsiz/ecgqR6kkYAl+0pz0tEMk218=
 github.com/dhui/dktest v0.3.16 h1:i6gq2YQEtcrjKbeJpBkWjE8MmLZPYllcjOFbTZuPDnw=
+github.com/djkazic/btcwallet v1.5.7 h1:3uW+BpkvbbZlnloounxl9IvGRhltJmN1HWs3hiSa9oQ=
+github.com/djkazic/btcwallet v1.5.7/go.mod h1:T3DjEAMZYIqQ28l+ixlB6DX4mFJXCX8Pzz+yACQcLsc=
+github.com/djkazic/btcwallet/walletdb v1.5.7 h1:R5QySVRWwO22Y8woWX6CXWrDy8lQe3JkB5glEckFGFA=
+github.com/djkazic/btcwallet/walletdb v1.5.7/go.mod h1:oJDxAEUHVtnmIIBaa22wSBPTVcs6hUp5NKWmI8xDwwU=
 github.com/docker/cli v20.10.17+incompatible h1:eO2KS7ZFeov5UJeaDmIs1NFEDRf32PaqRpvoEkKBy5M=
 github.com/docker/cli v20.10.17+incompatible/go.mod h1:JLrzqnKDaYBop7H2jaqPtU4hHvMKP+vjCwu2uszcLI8=
 github.com/docker/distribution v2.8.2+incompatible h1:T3de5rq0dB1j30rp0sA2rER+m322EBzniBPB6ZIzuh8=
@@ -451,16 +452,12 @@ github.com/lightningnetwork/lnd/clock v1.1.1 h1:OfR3/zcJd2RhH0RU+zX/77c0ZiOnIMsD
 github.com/lightningnetwork/lnd/clock v1.1.1/go.mod h1:mGnAhPyjYZQJmebS7aevElXKTFDuO+uNFFfMXK1W8xQ=
 github.com/lightningnetwork/lnd/healthcheck v1.2.3 h1:oqhOOy8WmIEa6RBkYKC0mmYZkhl8T2kGD97n9jpML8o=
 github.com/lightningnetwork/lnd/healthcheck v1.2.3/go.mod h1:eDxH3dEwV9DeBW/6inrmlVh1qBOFV0AI14EEPnGt9gc=
-github.com/lightningnetwork/lnd/kvdb v1.4.4 h1:bCv63rVCvzqj1BkagN/EWTov6NDDgYEG/t0z2HepRMk=
-github.com/lightningnetwork/lnd/kvdb v1.4.4/go.mod h1:9SuaIqMA9ugrVkdvgQkYXa8CAKYNYd4vsEYORP4V698=
 github.com/lightningnetwork/lnd/queue v1.1.1 h1:99ovBlpM9B0FRCGYJo6RSFDlt8/vOkQQZznVb18iNMI=
 github.com/lightningnetwork/lnd/queue v1.1.1/go.mod h1:7A6nC1Qrm32FHuhx/mi1cieAiBZo5O6l8IBIoQxvkz4=
 github.com/lightningnetwork/lnd/ticker v1.1.1 h1:J/b6N2hibFtC7JLV77ULQp++QLtCwT6ijJlbdiZFbSM=
 github.com/lightningnetwork/lnd/ticker v1.1.1/go.mod h1:waPTRAAcwtu7Ji3+3k+u/xH5GHovTsCoSVpho0KDvdA=
 github.com/lightningnetwork/lnd/tlv v1.1.1 h1:BW1u9+uHLRA9sm+8FBkAg1H9rPjrj3S9KvXYiCYjQWk=
 github.com/lightningnetwork/lnd/tlv v1.1.1/go.mod h1:292dSXpZ+BNnSJFjS1qvHden9LEbulmECglSgfg+4lw=
-github.com/lightningnetwork/lnd/tor v1.1.2 h1:3zv9z/EivNFaMF89v3ciBjCS7kvCj4ZFG7XvD2Qq0/k=
-github.com/lightningnetwork/lnd/tor v1.1.2/go.mod h1:j7T9uJ2NLMaHwE7GiBGnpYLn4f7NRoTM6qj+ul6/ycA=
 github.com/ltcsuite/ltcd v0.0.0-20190101042124-f37f8bf35796 h1:sjOGyegMIhvgfq5oaue6Td+hxZuf3tDC8lAPrFldqFw=
 github.com/ltcsuite/ltcd v0.0.0-20190101042124-f37f8bf35796/go.mod h1:3p7ZTf9V1sNPI5H8P3NkTFF4LuwMdPl2DodF60qAKqY=
 github.com/ltcsuite/ltcutil v0.0.0-20181217130922-17f3b04680b6/go.mod h1:8Vg/LTOO0KYa/vlHWJ6XZAevPQThGH5sufO0Hrou/lA=
