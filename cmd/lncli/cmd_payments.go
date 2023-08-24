@@ -17,7 +17,6 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
-	"github.com/lightninglabs/protobuf-hex-display/jsonpb"
 	"github.com/lightningnetwork/lnd/chainreg"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/routerrpc"
@@ -804,9 +803,12 @@ func formatPayment(ctxc context.Context, payment *lnrpc.Payment,
 }
 
 var payInvoiceCommand = cli.Command{
-	Name:      "payinvoice",
-	Category:  "Payments",
-	Usage:     "Pay an invoice over lightning.",
+	Name:     "payinvoice",
+	Category: "Payments",
+	Usage:    "Pay an invoice over lightning.",
+	Description: `
+	This command is a shortcut for 'sendpayment --pay_req='.
+	`,
 	ArgsUsage: "pay_req",
 	Flags: append(paymentFlags(),
 		cli.Int64Flag{
@@ -952,7 +954,7 @@ func sendToRoute(ctx *cli.Context) error {
 	// format.
 	var route *lnrpc.Route
 	routes := &lnrpc.QueryRoutesResponse{}
-	err = jsonpb.UnmarshalString(jsonRoutes, routes)
+	err = lnrpc.ProtoJSONUnmarshalOpts.Unmarshal([]byte(jsonRoutes), routes)
 	if err == nil {
 		if len(routes.Routes) == 0 {
 			return fmt.Errorf("no routes provided")
@@ -966,7 +968,9 @@ func sendToRoute(ctx *cli.Context) error {
 		route = routes.Routes[0]
 	} else {
 		routes := &routerrpc.BuildRouteResponse{}
-		err = jsonpb.UnmarshalString(jsonRoutes, routes)
+		err = lnrpc.ProtoJSONUnmarshalOpts.Unmarshal(
+			[]byte(jsonRoutes), routes,
+		)
 		if err != nil {
 			return fmt.Errorf("unable to unmarshal json string "+
 				"from incoming array of routes: %v", err)
@@ -1037,7 +1041,7 @@ var queryRoutesCommand = cli.Command{
 			Usage: "use mission control probabilities",
 		},
 		cli.Uint64Flag{
-			Name: "outgoing_chanid",
+			Name: "outgoing_chan_id",
 			Usage: "(optional) the channel id of the channel " +
 				"that must be taken to the first hop",
 		},
@@ -1126,7 +1130,7 @@ func queryRoutes(ctx *cli.Context) error {
 		FinalCltvDelta:    int32(ctx.Int("final_cltv_delta")),
 		UseMissionControl: ctx.Bool("use_mc"),
 		CltvLimit:         uint32(ctx.Uint64(cltvLimitFlag.Name)),
-		OutgoingChanId:    ctx.Uint64("outgoing_chanid"),
+		OutgoingChanId:    ctx.Uint64("outgoing_chan_id"),
 		TimePref:          ctx.Float64(timePrefFlag.Name),
 		IgnoredPairs:      ignoredPairs,
 	}

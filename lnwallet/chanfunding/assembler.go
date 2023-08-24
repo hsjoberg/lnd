@@ -84,6 +84,13 @@ type Request struct {
 	// e.g. anchor channels.
 	WalletReserve btcutil.Amount
 
+	// Outpoints is a list of client-selected outpoints that should be used
+	// for funding a channel. If LocalAmt is specified then this amount is
+	// allocated from the sum of outpoints towards funding. If the
+	// FundUpToMaxAmt is specified the entirety of selected funds is
+	// allocated towards channel funding.
+	Outpoints []wire.OutPoint
+
 	// MinConfs controls how many confirmations a coin need to be eligible
 	// to be used as an input to the funding transaction. If this value is
 	// set to zero, then zero conf outputs may be spent.
@@ -103,6 +110,11 @@ type Request struct {
 	// ChangeAddr is a closure that will provide the Assembler with a
 	// change address for the funding transaction if needed.
 	ChangeAddr func() (btcutil.Address, error)
+
+	// Musig2 if true, then musig2 will be used to generate the funding
+	// output. By definition, this'll also use segwit v1 (taproot) for the
+	// funding output.
+	Musig2 bool
 }
 
 // Intent is returned by an Assembler and represents the base functionality the

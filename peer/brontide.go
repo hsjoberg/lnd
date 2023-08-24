@@ -21,6 +21,7 @@ import (
 	"github.com/lightningnetwork/lnd/build"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/channeldb/models"
 	"github.com/lightningnetwork/lnd/channelnotifier"
 	"github.com/lightningnetwork/lnd/contractcourt"
 	"github.com/lightningnetwork/lnd/discovery"
@@ -32,6 +33,7 @@ import (
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/invoices"
 	"github.com/lightningnetwork/lnd/lnpeer"
+	"github.com/lightningnetwork/lnd/lnutils"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 	"github.com/lightningnetwork/lnd/lnwallet/chancloser"
@@ -87,8 +89,13 @@ type outgoingMsg struct {
 // the receiver of the request to report when the channel creation process has
 // completed.
 type newChannelMsg struct {
-	channel *channeldb.OpenChannel
-	err     chan error
+	// channel is used when the pending channel becomes active.
+	channel *lnpeer.NewChannel
+
+	// channelID is used when there's a new pending channel.
+	channelID lnwire.ChannelID
+
+	err chan error
 }
 
 type customMsg struct {
@@ -228,7 +235,7 @@ type Config struct {
 
 	// RoutingPolicy is used to set the forwarding policy for links created by
 	// the Brontide.
-	RoutingPolicy htlcswitch.ForwardingPolicy
+	RoutingPolicy models.ForwardingPolicy
 
 	// Sphinx is used when setting up ChannelLinks so they can decode sphinx
 	// onion blobs.
@@ -263,8 +270,8 @@ type Config struct {
 
 	// GenNodeAnnouncement is used to send our node announcement to the remote
 	// on startup.
-	GenNodeAnnouncement func(bool,
-		...netann.NodeAnnModifier) (lnwire.NodeAnnouncement, error)
+	GenNodeAnnouncement func(...netann.NodeAnnModifier) (
+		lnwire.NodeAnnouncement, error)
 
 	// PrunePersistentPeerConnection is used to remove all internal state
 	// related to this peer in the server.
@@ -403,10 +410,6 @@ type Brontide struct {
 	// objects to queue messages to be sent out on the wire.
 	outgoingQueue chan outgoingMsg
 
-	// activeChanMtx protects access to the activeChannels and
-	// addedChannels maps.
-	activeChanMtx sync.RWMutex
-
 	// activeChannels is a map which stores the state machines of all
 	// active channels. Channels are indexed into the map by the txid of
 	// the funding transaction which opened the channel.
@@ -417,17 +420,26 @@ type Brontide struct {
 	// see if this is a pending channel or not. The tradeoff here is either
 	// having two maps everywhere (one for pending, one for confirmed chans)
 	// or having an extra nil-check per access.
-	activeChannels map[lnwire.ChannelID]*lnwallet.LightningChannel
+	activeChannels *lnutils.SyncMap[
+		lnwire.ChannelID, *lnwallet.LightningChannel]
 
 	// addedChannels tracks any new channels opened during this peer's
 	// lifecycle. We use this to filter out these new channels when the time
 	// comes to request a reenable for active channels, since they will have
 	// waited a shorter duration.
-	addedChannels map[lnwire.ChannelID]struct{}
+	addedChannels *lnutils.SyncMap[lnwire.ChannelID, struct{}]
 
-	// newChannels is used by the fundingManager to send fully opened
+	// newActiveChannel is used by the fundingManager to send fully opened
 	// channels to the source peer which handled the funding workflow.
-	newChannels chan *newChannelMsg
+	newActiveChannel chan *newChannelMsg
+
+	// newPendingChannel is used by the fundingManager to send pending open
+	// channels to the source peer which handled the funding workflow.
+	newPendingChannel chan *newChannelMsg
+
+	// removePendingChannel is used by the fundingManager to cancel pending
+	// open channels to the source peer when the funding flow is failed.
+	removePendingChannel chan *newChannelMsg
 
 	// activeMsgStreams is a map from channel id to the channel streams that
 	// proxy messages to individual, active links.
@@ -471,9 +483,9 @@ type Brontide struct {
 	// potentially holding lots of un-consumed events.
 	channelEventClient *subscribe.Client
 
-	queueQuit chan struct{}
-	quit      chan struct{}
-	wg        sync.WaitGroup
+	startReady chan struct{}
+	quit       chan struct{}
+	wg         sync.WaitGroup
 
 	// log is a peer-specific logging instance.
 	log btclog.Logger
@@ -487,13 +499,16 @@ func NewBrontide(cfg Config) *Brontide {
 	logPrefix := fmt.Sprintf("Peer(%x):", cfg.PubKeyBytes)
 
 	p := &Brontide{
-		cfg:            cfg,
-		activeSignal:   make(chan struct{}),
-		sendQueue:      make(chan outgoingMsg),
-		outgoingQueue:  make(chan outgoingMsg),
-		addedChannels:  make(map[lnwire.ChannelID]struct{}),
-		activeChannels: make(map[lnwire.ChannelID]*lnwallet.LightningChannel),
-		newChannels:    make(chan *newChannelMsg, 1),
+		cfg:           cfg,
+		activeSignal:  make(chan struct{}),
+		sendQueue:     make(chan outgoingMsg),
+		outgoingQueue: make(chan outgoingMsg),
+		addedChannels: &lnutils.SyncMap[lnwire.ChannelID, struct{}]{},
+		activeChannels: &lnutils.SyncMap[
+			lnwire.ChannelID, *lnwallet.LightningChannel,
+		]{},
+		newActiveChannel:  make(chan *newChannelMsg, 1),
+		newPendingChannel: make(chan *newChannelMsg, 1),
 
 		activeMsgStreams:   make(map[lnwire.ChannelID]*msgStream),
 		activeChanCloses:   make(map[lnwire.ChannelID]*chancloser.ChanCloser),
@@ -501,7 +516,7 @@ func NewBrontide(cfg Config) *Brontide {
 		linkFailures:       make(chan linkFailureReport),
 		chanCloseMsgs:      make(chan *closeMsg),
 		resentChanSyncMsg:  make(map[lnwire.ChannelID]struct{}),
-		queueQuit:          make(chan struct{}),
+		startReady:         make(chan struct{}),
 		quit:               make(chan struct{}),
 		log:                build.NewPrefixLog(logPrefix, peerLog),
 	}
@@ -515,6 +530,11 @@ func (p *Brontide) Start() error {
 	if atomic.AddInt32(&p.started, 1) != 1 {
 		return nil
 	}
+
+	// Once we've finished starting up the peer, we'll signal to other
+	// goroutines that the they can move forward to tear down the peer, or
+	// carry out other relevant changes.
+	defer close(p.startReady)
 
 	p.log.Tracef("starting with conn[%v->%v]",
 		p.cfg.Conn.LocalAddr(), p.cfg.Conn.RemoteAddr())
@@ -858,9 +878,9 @@ func (p *Brontide) loadActiveChannels(chans []*channeldb.OpenChannel) (
 		// If we don't yet have an advertised routing policy, then
 		// we'll use the current default, otherwise we'll translate the
 		// routing policy into a forwarding policy.
-		var forwardingPolicy *htlcswitch.ForwardingPolicy
+		var forwardingPolicy *models.ForwardingPolicy
 		if selfPolicy != nil {
-			forwardingPolicy = &htlcswitch.ForwardingPolicy{
+			forwardingPolicy = &models.ForwardingPolicy{
 				MinHTLCOut:    selfPolicy.MinHTLC,
 				MaxHTLC:       selfPolicy.MaxHTLC,
 				BaseFee:       selfPolicy.FeeBaseMSat,
@@ -884,9 +904,7 @@ func (p *Brontide) loadActiveChannels(chans []*channeldb.OpenChannel) (
 		// here would just be extra work as we'll tear them down when creating
 		// + adding the final link.
 		if lnChan.IsPending() {
-			p.activeChanMtx.Lock()
-			p.activeChannels[chanID] = nil
-			p.activeChanMtx.Unlock()
+			p.activeChannels.Store(chanID, nil)
 
 			continue
 		}
@@ -908,9 +926,7 @@ func (p *Brontide) loadActiveChannels(chans []*channeldb.OpenChannel) (
 				"switch: %v", chanPoint, err)
 		}
 
-		p.activeChanMtx.Lock()
-		p.activeChannels[chanID] = lnChan
-		p.activeChanMtx.Unlock()
+		p.activeChannels.Store(chanID, lnChan)
 	}
 
 	return msgs, nil
@@ -919,7 +935,7 @@ func (p *Brontide) loadActiveChannels(chans []*channeldb.OpenChannel) (
 // addLink creates and adds a new ChannelLink from the specified channel.
 func (p *Brontide) addLink(chanPoint *wire.OutPoint,
 	lnChan *lnwallet.LightningChannel,
-	forwardingPolicy *htlcswitch.ForwardingPolicy,
+	forwardingPolicy *models.ForwardingPolicy,
 	chainEvents *contractcourt.ChainEventSubscription,
 	syncStates bool) error {
 
@@ -957,9 +973,23 @@ func (p *Brontide) addLink(chanPoint *wire.OutPoint,
 	// okay if the clients are disabled altogether and these values are nil,
 	// as the link will check for nilness before using either.
 	var towerClient htlcswitch.TowerClient
-	if chanType.HasAnchors() {
+	switch {
+	case chanType.IsTaproot():
+		// Leave the tower client as nil for now until the tower client
+		// has support for taproot channels.
+		//
+		// If the user has activated the tower client, then add a log
+		// to explain that any taproot channel updates wil not be
+		// backed up to a tower.
+		if p.cfg.TowerClient != nil {
+			p.log.Debugf("Updates for channel %s will not be "+
+				"backed up to a watchtower as watchtowers "+
+				"are not yet taproot channel compatible",
+				chanPoint)
+		}
+	case chanType.HasAnchors():
 		towerClient = p.cfg.AnchorTowerClient
-	} else {
+	default:
 		towerClient = p.cfg.TowerClient
 	}
 
@@ -1036,7 +1066,7 @@ func (p *Brontide) maybeSendNodeAnn(channels []*channeldb.OpenChannel) {
 		return
 	}
 
-	ourNodeAnn, err := p.cfg.GenNodeAnnouncement(false)
+	ourNodeAnn, err := p.cfg.GenNodeAnnouncement()
 	if err != nil {
 		p.log.Debugf("Unable to retrieve node announcement: %v", err)
 		return
@@ -1056,6 +1086,14 @@ func (p *Brontide) maybeSendNodeAnn(channels []*channeldb.OpenChannel) {
 // calling Disconnect will signal the quit channel and the method will not
 // block, since no goroutines were spawned.
 func (p *Brontide) WaitForDisconnect(ready chan struct{}) {
+	// Before we try to call the `Wait` goroutine, we'll make sure the main
+	// set of goroutines are already active.
+	select {
+	case <-p.startReady:
+	case <-p.quit:
+		return
+	}
+
 	select {
 	case <-ready:
 	case <-p.quit:
@@ -1069,6 +1107,14 @@ func (p *Brontide) WaitForDisconnect(ready chan struct{}) {
 // allocated to the peer can now be cleaned up.
 func (p *Brontide) Disconnect(reason error) {
 	if !atomic.CompareAndSwapInt32(&p.disconnect, 0, 1) {
+		return
+	}
+
+	// Make sure initialization has completed before we try to tear things
+	// down.
+	select {
+	case <-p.startReady:
+	case <-p.quit:
 		return
 	}
 
@@ -1099,7 +1145,7 @@ func (p *Brontide) readNextMessage() (lnwire.Message, error) {
 
 	pktLen, err := noiseConn.ReadNextHeader()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read next header: %w", err)
 	}
 
 	// First we'll read the next _full_ message. We do this rather than
@@ -1128,7 +1174,7 @@ func (p *Brontide) readNextMessage() (lnwire.Message, error) {
 		// pool.
 		rawMsg, readErr := noiseConn.ReadNextBody(buf[:pktLen])
 		if readErr != nil {
-			return readErr
+			return fmt.Errorf("read next body: %w", readErr)
 		}
 		msgLen = uint64(len(rawMsg))
 
@@ -1568,15 +1614,15 @@ out:
 
 		case *lnwire.Warning:
 			targetChan = msg.ChanID
-			isLinkUpdate = p.handleWarning(msg)
+			isLinkUpdate = p.handleWarningOrError(targetChan, msg)
 
 		case *lnwire.Error:
 			targetChan = msg.ChanID
-			isLinkUpdate = p.handleError(msg)
+			isLinkUpdate = p.handleWarningOrError(targetChan, msg)
 
 		case *lnwire.ChannelReestablish:
 			targetChan = msg.ChanID
-			isLinkUpdate = p.isActiveChannel(targetChan)
+			isLinkUpdate = p.hasChannel(targetChan)
 
 			// If we failed to find the link in question, and the
 			// message received was a channel sync message, then
@@ -1593,9 +1639,22 @@ out:
 				}
 			}
 
+		// For messages that implement the LinkUpdater interface, we
+		// will consider them as link updates and send them to
+		// chanStream. These messages will be queued inside chanStream
+		// if the channel is not active yet.
 		case LinkUpdater:
 			targetChan = msg.TargetChanID()
-			isLinkUpdate = p.isActiveChannel(targetChan)
+			isLinkUpdate = p.hasChannel(targetChan)
+
+			// Log an error if we don't have this channel. This
+			// means the peer has sent us a message with unknown
+			// channel ID.
+			if !isLinkUpdate {
+				p.log.Errorf("Unknown channel ID: %v found "+
+					"in received msg=%s", targetChan,
+					nextMsg.MsgType())
+			}
 
 		case *lnwire.ChannelUpdate,
 			*lnwire.ChannelAnnouncement,
@@ -1629,20 +1688,7 @@ out:
 		if isLinkUpdate {
 			// If this is a channel update, then we need to feed it
 			// into the channel's in-order message stream.
-			chanStream, ok := p.activeMsgStreams[targetChan]
-			if !ok {
-				// If a stream hasn't yet been created, then
-				// we'll do so, add it to the map, and finally
-				// start it.
-				chanStream = newChanMsgStream(p, targetChan)
-				p.activeMsgStreams[targetChan] = chanStream
-				chanStream.Start()
-				defer chanStream.Stop()
-			}
-
-			// With the stream obtained, add the message to the
-			// stream so we can continue processing message.
-			chanStream.AddMsg(nextMsg)
+			p.sendLinkUpdateMsg(targetChan, nextMsg)
 		}
 
 		idleTimer.Reset(idleTimeout)
@@ -1664,12 +1710,56 @@ func (p *Brontide) handleCustomMessage(msg *lnwire.Custom) error {
 	return p.cfg.HandleCustomMessage(p.PubKey(), msg)
 }
 
+// isLoadedFromDisk returns true if the provided channel ID is loaded from
+// disk.
+//
+// NOTE: only returns true for pending channels.
+func (p *Brontide) isLoadedFromDisk(chanID lnwire.ChannelID) bool {
+	// If this is a newly added channel, no need to reestablish.
+	_, added := p.addedChannels.Load(chanID)
+	if added {
+		return false
+	}
+
+	// Return false if the channel is unknown.
+	channel, ok := p.activeChannels.Load(chanID)
+	if !ok {
+		return false
+	}
+
+	// During startup, we will use a nil value to mark a pending channel
+	// that's loaded from disk.
+	return channel == nil
+}
+
 // isActiveChannel returns true if the provided channel id is active, otherwise
 // returns false.
 func (p *Brontide) isActiveChannel(chanID lnwire.ChannelID) bool {
-	p.activeChanMtx.RLock()
-	_, ok := p.activeChannels[chanID]
-	p.activeChanMtx.RUnlock()
+	// The channel would be nil if,
+	// - the channel doesn't exist, or,
+	// - the channel exists, but is pending. In this case, we don't
+	//   consider this channel active.
+	channel, _ := p.activeChannels.Load(chanID)
+
+	return channel != nil
+}
+
+// isPendingChannel returns true if the provided channel ID is pending, and
+// returns false if the channel is active or unknown.
+func (p *Brontide) isPendingChannel(chanID lnwire.ChannelID) bool {
+	// Return false if the channel is unknown.
+	channel, ok := p.activeChannels.Load(chanID)
+	if !ok {
+		return false
+	}
+
+	return channel == nil
+}
+
+// hasChannel returns true if the peer has a pending/active channel specified
+// by the channel ID.
+func (p *Brontide) hasChannel(chanID lnwire.ChannelID) bool {
+	_, ok := p.activeChannels.Load(chanID)
 	return ok
 }
 
@@ -1680,17 +1770,20 @@ func (p *Brontide) isActiveChannel(chanID lnwire.ChannelID) bool {
 func (p *Brontide) storeError(err error) {
 	var haveChannels bool
 
-	p.activeChanMtx.RLock()
-	for _, channel := range p.activeChannels {
+	p.activeChannels.Range(func(_ lnwire.ChannelID,
+		channel *lnwallet.LightningChannel) bool {
+
 		// Pending channels will be nil in the activeChannels map.
 		if channel == nil {
-			continue
+			// Return true to continue the iteration.
+			return true
 		}
 
 		haveChannels = true
-		break
-	}
-	p.activeChanMtx.RUnlock()
+
+		// Return false to break the iteration.
+		return false
+	})
 
 	// If we do not have any active channels with the peer, we do not store
 	// errors as a dos mitigation.
@@ -1704,65 +1797,37 @@ func (p *Brontide) storeError(err error) {
 	)
 }
 
-// handleWarning processes a warning message read from the remote peer. The
-// boolean return indicates whether the message should be delivered to a
-// targeted peer or not. The message gets stored in memory as an error if we
-// have open channels with the peer we received it from.
+// handleWarningOrError processes a warning or error msg and returns true if
+// msg should be forwarded to the associated channel link. False is returned if
+// any necessary forwarding of msg was already handled by this method. If msg is
+// an error from a peer with an active channel, we'll store it in memory.
 //
 // NOTE: This method should only be called from within the readHandler.
-func (p *Brontide) handleWarning(msg *lnwire.Warning) bool {
-	switch {
-	// Connection wide messages should be forward the warning to all the
-	// channels with this peer.
-	case msg.ChanID == lnwire.ConnectionWideID:
-		for _, chanStream := range p.activeMsgStreams {
-			chanStream.AddMsg(msg)
-		}
+func (p *Brontide) handleWarningOrError(chanID lnwire.ChannelID,
+	msg lnwire.Message) bool {
 
-		return false
-
-	// If the channel ID for the warning message corresponds to a pending
-	// channel, then the funding manager will handle the warning.
-	case p.cfg.FundingManager.IsPendingChannel(msg.ChanID, p):
-		p.cfg.FundingManager.ProcessFundingMsg(msg, p)
-		return false
-
-	// If not we hand the warning to the channel link for this channel.
-	case p.isActiveChannel(msg.ChanID):
-		return true
-
-	default:
-		return false
+	if errMsg, ok := msg.(*lnwire.Error); ok {
+		p.storeError(errMsg)
 	}
-}
-
-// handleError processes an error message read from the remote peer. The boolean
-// returns indicates whether the message should be delivered to a targeted peer.
-// It stores the error we received from the peer in memory if we have a channel
-// open with the peer.
-//
-// NOTE: This method should only be called from within the readHandler.
-func (p *Brontide) handleError(msg *lnwire.Error) bool {
-	// Store the error we have received.
-	p.storeError(msg)
 
 	switch {
-	// In the case of an all-zero channel ID we want to forward the error to
-	// all channels with this peer.
-	case msg.ChanID == lnwire.ConnectionWideID:
+	// Connection wide messages should be forwarded to all channel links
+	// with this peer.
+	case chanID == lnwire.ConnectionWideID:
 		for _, chanStream := range p.activeMsgStreams {
 			chanStream.AddMsg(msg)
 		}
+
 		return false
 
-	// If the channel ID for the error message corresponds to a pending
-	// channel, then the funding manager will handle the error.
-	case p.cfg.FundingManager.IsPendingChannel(msg.ChanID, p):
+	// If the channel ID for the message corresponds to a pending channel,
+	// then the funding manager will handle it.
+	case p.cfg.FundingManager.IsPendingChannel(chanID, p):
 		p.cfg.FundingManager.ProcessFundingMsg(msg, p)
 		return false
 
-	// If not we hand the error to the channel link for this channel.
-	case p.isActiveChannel(msg.ChanID):
+	// If not we hand the message to the channel link for this channel.
+	case p.isActiveChannel(chanID):
 		return true
 
 	default:
@@ -2286,25 +2351,30 @@ func (p *Brontide) queue(priority bool, msg lnwire.Message,
 // ChannelSnapshots returns a slice of channel snapshots detailing all
 // currently active channels maintained with the remote peer.
 func (p *Brontide) ChannelSnapshots() []*channeldb.ChannelSnapshot {
-	p.activeChanMtx.RLock()
-	defer p.activeChanMtx.RUnlock()
+	snapshots := make(
+		[]*channeldb.ChannelSnapshot, 0, p.activeChannels.Len(),
+	)
 
-	snapshots := make([]*channeldb.ChannelSnapshot, 0, len(p.activeChannels))
-	for _, activeChan := range p.activeChannels {
-		// If the activeChan is nil, then we skip it as the channel is pending.
+	p.activeChannels.ForEach(func(_ lnwire.ChannelID,
+		activeChan *lnwallet.LightningChannel) error {
+
+		// If the activeChan is nil, then we skip it as the channel is
+		// pending.
 		if activeChan == nil {
-			continue
+			return nil
 		}
 
 		// We'll only return a snapshot for channels that are
 		// *immediately* available for routing payments over.
 		if activeChan.RemoteNextRevocation() == nil {
-			continue
+			return nil
 		}
 
 		snapshot := activeChan.StateSnapshot()
 		snapshots = append(snapshots, snapshot)
-	}
+
+		return nil
+	})
 
 	return snapshots
 }
@@ -2347,133 +2417,24 @@ func (p *Brontide) channelManager() {
 out:
 	for {
 		select {
+		// A new pending channel has arrived which means we are about
+		// to complete a funding workflow and is waiting for the final
+		// `ChannelReady` messages to be exchanged. We will add this
+		// channel to the `activeChannels` with a nil value to indicate
+		// this is a pending channel.
+		case req := <-p.newPendingChannel:
+			p.handleNewPendingChannel(req)
+
 		// A new channel has arrived which means we've just completed a
 		// funding workflow. We'll initialize the necessary local
 		// state, and notify the htlc switch of a new link.
-		case newChanReq := <-p.newChannels:
-			newChan := newChanReq.channel
-			chanPoint := &newChan.FundingOutpoint
-			chanID := lnwire.NewChanIDFromOutPoint(chanPoint)
+		case req := <-p.newActiveChannel:
+			p.handleNewActiveChannel(req)
 
-			// Only update RemoteNextRevocation if the channel is in the
-			// activeChannels map and if we added the link to the switch.
-			// Only active channels will be added to the switch.
-			p.activeChanMtx.Lock()
-			currentChan, ok := p.activeChannels[chanID]
-			if ok && currentChan != nil {
-				p.log.Infof("Already have ChannelPoint(%v), "+
-					"ignoring.", chanPoint)
-
-				p.activeChanMtx.Unlock()
-				close(newChanReq.err)
-
-				// If we're being sent a new channel, and our
-				// existing channel doesn't have the next
-				// revocation, then we need to update the
-				// current existing channel.
-				if currentChan.RemoteNextRevocation() != nil {
-					continue
-				}
-
-				p.log.Infof("Processing retransmitted "+
-					"ChannelReady for ChannelPoint(%v)",
-					chanPoint)
-
-				nextRevoke := newChan.RemoteNextRevocation
-				err := currentChan.InitNextRevocation(nextRevoke)
-				if err != nil {
-					p.log.Errorf("unable to init chan "+
-						"revocation: %v", err)
-					continue
-				}
-
-				continue
-			}
-
-			// If not already active, we'll add this channel to the
-			// set of active channels, so we can look it up later
-			// easily according to its channel ID.
-			lnChan, err := lnwallet.NewLightningChannel(
-				p.cfg.Signer, newChan, p.cfg.SigPool,
-			)
-			if err != nil {
-				p.activeChanMtx.Unlock()
-				err := fmt.Errorf("unable to create "+
-					"LightningChannel: %v", err)
-				p.log.Errorf(err.Error())
-
-				newChanReq.err <- err
-				continue
-			}
-
-			// This refreshes the activeChannels entry if the link was not in
-			// the switch, also populates for new entries.
-			p.activeChannels[chanID] = lnChan
-			p.addedChannels[chanID] = struct{}{}
-			p.activeChanMtx.Unlock()
-
-			p.log.Infof("New channel active ChannelPoint(%v) "+
-				"with peer", chanPoint)
-
-			// Next, we'll assemble a ChannelLink along with the
-			// necessary items it needs to function.
-			//
-			// TODO(roasbeef): panic on below?
-			chainEvents, err := p.cfg.ChainArb.SubscribeChannelEvents(
-				*chanPoint,
-			)
-			if err != nil {
-				err := fmt.Errorf("unable to subscribe to "+
-					"chain events: %v", err)
-				p.log.Errorf(err.Error())
-
-				newChanReq.err <- err
-				continue
-			}
-
-			// We'll query the localChanCfg of the new channel to determine the
-			// minimum HTLC value that can be forwarded. For the maximum HTLC
-			// value that can be forwarded and fees we'll use the default
-			// values, as they currently are always set to the default values
-			// at initial channel creation. Note that the maximum HTLC value
-			// defaults to the cap on the total value of outstanding HTLCs.
-			//
-			// TODO(guggero): We should instead pass in the current
-			// forwarding policy from the funding manager to avoid
-			// needing us to update the link once the channel is
-			// announced to the network with custom user values.
-			fwdMinHtlc := lnChan.FwdMinHtlc()
-			defaultPolicy := p.cfg.RoutingPolicy
-			forwardingPolicy := &htlcswitch.ForwardingPolicy{
-				MinHTLCOut:    fwdMinHtlc,
-				MaxHTLC:       newChan.LocalChanCfg.MaxPendingAmount,
-				BaseFee:       defaultPolicy.BaseFee,
-				FeeRate:       defaultPolicy.FeeRate,
-				TimeLockDelta: defaultPolicy.TimeLockDelta,
-			}
-
-			// If we've reached this point, there are two possible scenarios.
-			// If the channel was in the active channels map as nil, then it
-			// was loaded from disk and we need to send reestablish. Else,
-			// it was not loaded from disk and we don't need to send
-			// reestablish as this is a fresh channel.
-			shouldReestablish := ok
-
-			// Create the link and add it to the switch.
-			err = p.addLink(
-				chanPoint, lnChan, forwardingPolicy,
-				chainEvents, shouldReestablish,
-			)
-			if err != nil {
-				err := fmt.Errorf("can't register new channel "+
-					"link(%v) with peer", chanPoint)
-				p.log.Errorf(err.Error())
-
-				newChanReq.err <- err
-				continue
-			}
-
-			close(newChanReq.err)
+		// The funding flow for a pending channel is failed, we will
+		// remove it from Brontide.
+		case req := <-p.removePendingChannel:
+			p.handleRemovePendingChannel(req)
 
 		// We've just received a local request to close an active
 		// channel. It will either kick of a cooperative channel
@@ -2525,16 +2486,19 @@ out:
 		case <-p.quit:
 			// As, we've been signalled to exit, we'll reset all
 			// our active channel back to their default state.
-			p.activeChanMtx.Lock()
-			for _, channel := range p.activeChannels {
-				// If the channel is nil, continue as it's a pending channel.
-				if channel == nil {
-					continue
+			p.activeChannels.ForEach(func(_ lnwire.ChannelID,
+				lc *lnwallet.LightningChannel) error {
+
+				// Exit if the channel is nil as it's a pending
+				// channel.
+				if lc == nil {
+					return nil
 				}
 
-				channel.ResetState()
-			}
-			p.activeChanMtx.Unlock()
+				lc.ResetState()
+
+				return nil
+			})
 
 			break out
 		}
@@ -2624,9 +2588,7 @@ func (p *Brontide) fetchActiveChanCloser(chanID lnwire.ChannelID) (
 
 	// First, we'll ensure that we actually know of the target channel. If
 	// not, we'll ignore this message.
-	p.activeChanMtx.RLock()
-	channel, ok := p.activeChannels[chanID]
-	p.activeChanMtx.RUnlock()
+	channel, ok := p.activeChannels.Load(chanID)
 
 	// If the channel isn't in the map or the channel is nil, return
 	// ErrChannelNotFound as the channel is pending.
@@ -2688,19 +2650,18 @@ func (p *Brontide) fetchActiveChanCloser(chanID lnwire.ChannelID) (
 func (p *Brontide) filterChannelsToEnable() []wire.OutPoint {
 	var activePublicChans []wire.OutPoint
 
-	p.activeChanMtx.RLock()
-	defer p.activeChanMtx.RUnlock()
+	p.activeChannels.Range(func(chanID lnwire.ChannelID,
+		lnChan *lnwallet.LightningChannel) bool {
 
-	for chanID, lnChan := range p.activeChannels {
 		// If the lnChan is nil, continue as this is a pending channel.
 		if lnChan == nil {
-			continue
+			return true
 		}
 
 		dbChan := lnChan.State()
 		isPublic := dbChan.ChannelFlags&lnwire.FFAnnounceChannel != 0
 		if !isPublic || dbChan.IsPending {
-			continue
+			return true
 		}
 
 		// We'll also skip any channels added during this peer's
@@ -2708,14 +2669,16 @@ func (p *Brontide) filterChannelsToEnable() []wire.OutPoint {
 		// first announcement will be enabled, and the chan status
 		// manager will begin monitoring them passively since they exist
 		// in the database.
-		if _, ok := p.addedChannels[chanID]; ok {
-			continue
+		if _, ok := p.addedChannels.Load(chanID); ok {
+			return true
 		}
 
 		activePublicChans = append(
 			activePublicChans, dbChan.FundingOutpoint,
 		)
-	}
+
+		return true
+	})
 
 	return activePublicChans
 }
@@ -2940,6 +2903,7 @@ func (p *Brontide) createChanCloser(channel *lnwallet.LightningChannel,
 	chanCloser := chancloser.NewChanCloser(
 		chancloser.ChanCloseCfg{
 			Channel:      channel,
+			MusigSession: NewMusigChanCloser(channel),
 			FeeEstimator: &chancloser.SimpleCoopFeeEstimator{},
 			BroadcastTx:  p.cfg.Wallet.PublishTransaction,
 			DisableChannel: func(op wire.OutPoint) error {
@@ -2969,9 +2933,7 @@ func (p *Brontide) createChanCloser(channel *lnwallet.LightningChannel,
 func (p *Brontide) handleLocalCloseReq(req *htlcswitch.ChanClose) {
 	chanID := lnwire.NewChanIDFromOutPoint(req.ChanPoint)
 
-	p.activeChanMtx.RLock()
-	channel, ok := p.activeChannels[chanID]
-	p.activeChanMtx.RUnlock()
+	channel, ok := p.activeChannels.Load(chanID)
 
 	// Though this function can't be called for pending channels, we still
 	// check whether channel is nil for safety.
@@ -3081,9 +3043,7 @@ func (p *Brontide) handleLinkFailure(failure linkFailureReport) {
 	// Retrieve the channel from the map of active channels. We do this to
 	// have access to it even after WipeChannel remove it from the map.
 	chanID := lnwire.NewChanIDFromOutPoint(&failure.chanPoint)
-	p.activeChanMtx.Lock()
-	lnChan := p.activeChannels[chanID]
-	p.activeChanMtx.Unlock()
+	lnChan, _ := p.activeChannels.Load(chanID)
 
 	// We begin by wiping the link, which will remove it from the switch,
 	// such that it won't be attempted used for any more updates.
@@ -3305,9 +3265,7 @@ func WaitForChanToClose(bestHeight uint32, notifier chainntnfs.ChainNotifier,
 func (p *Brontide) WipeChannel(chanPoint *wire.OutPoint) {
 	chanID := lnwire.NewChanIDFromOutPoint(chanPoint)
 
-	p.activeChanMtx.Lock()
-	delete(p.activeChannels, chanID)
-	p.activeChanMtx.Unlock()
+	p.activeChannels.Delete(chanID)
 
 	// Instruct the HtlcSwitch to close this link as the channel is no
 	// longer active.
@@ -3548,17 +3506,17 @@ func (p *Brontide) Address() net.Addr {
 // added if the cancel channel is closed.
 //
 // NOTE: Part of the lnpeer.Peer interface.
-func (p *Brontide) AddNewChannel(channel *channeldb.OpenChannel,
+func (p *Brontide) AddNewChannel(newChan *lnpeer.NewChannel,
 	cancel <-chan struct{}) error {
 
 	errChan := make(chan error, 1)
 	newChanMsg := &newChannelMsg{
-		channel: channel,
+		channel: newChan,
 		err:     errChan,
 	}
 
 	select {
-	case p.newChannels <- newChanMsg:
+	case p.newActiveChannel <- newChanMsg:
 	case <-cancel:
 		return errors.New("canceled adding new channel")
 	case <-p.quit:
@@ -3570,6 +3528,72 @@ func (p *Brontide) AddNewChannel(channel *channeldb.OpenChannel,
 	select {
 	case err := <-errChan:
 		return err
+	case <-p.quit:
+		return lnpeer.ErrPeerExiting
+	}
+}
+
+// AddPendingChannel adds a pending open channel to the peer. The channel
+// should fail to be added if the cancel channel is closed.
+//
+// NOTE: Part of the lnpeer.Peer interface.
+func (p *Brontide) AddPendingChannel(cid lnwire.ChannelID,
+	cancel <-chan struct{}) error {
+
+	errChan := make(chan error, 1)
+	newChanMsg := &newChannelMsg{
+		channelID: cid,
+		err:       errChan,
+	}
+
+	select {
+	case p.newPendingChannel <- newChanMsg:
+
+	case <-cancel:
+		return errors.New("canceled adding pending channel")
+
+	case <-p.quit:
+		return lnpeer.ErrPeerExiting
+	}
+
+	// We pause here to wait for the peer to recognize the new pending
+	// channel before we close the channel barrier corresponding to the
+	// channel.
+	select {
+	case err := <-errChan:
+		return err
+
+	case <-cancel:
+		return errors.New("canceled adding pending channel")
+
+	case <-p.quit:
+		return lnpeer.ErrPeerExiting
+	}
+}
+
+// RemovePendingChannel removes a pending open channel from the peer.
+//
+// NOTE: Part of the lnpeer.Peer interface.
+func (p *Brontide) RemovePendingChannel(cid lnwire.ChannelID) error {
+	errChan := make(chan error, 1)
+	newChanMsg := &newChannelMsg{
+		channelID: cid,
+		err:       errChan,
+	}
+
+	select {
+	case p.removePendingChannel <- newChanMsg:
+	case <-p.quit:
+		return lnpeer.ErrPeerExiting
+	}
+
+	// We pause here to wait for the peer to respond to the cancellation of
+	// the pending channel before we close the channel barrier
+	// corresponding to the channel.
+	select {
+	case err := <-errChan:
+		return err
+
 	case <-p.quit:
 		return lnpeer.ErrPeerExiting
 	}
@@ -3741,4 +3765,234 @@ func (p *Brontide) attachChannelEventSubscription() error {
 	p.channelEventClient = sub
 
 	return nil
+}
+
+// updateNextRevocation updates the existing channel's next revocation if it's
+// nil.
+func (p *Brontide) updateNextRevocation(c *channeldb.OpenChannel) error {
+	chanPoint := &c.FundingOutpoint
+	chanID := lnwire.NewChanIDFromOutPoint(chanPoint)
+
+	// Read the current channel.
+	currentChan, loaded := p.activeChannels.Load(chanID)
+
+	// currentChan should exist, but we perform a check anyway to avoid nil
+	// pointer dereference.
+	if !loaded {
+		return fmt.Errorf("missing active channel with chanID=%v",
+			chanID)
+	}
+
+	// currentChan should not be nil, but we perform a check anyway to
+	// avoid nil pointer dereference.
+	if currentChan == nil {
+		return fmt.Errorf("found nil active channel with chanID=%v",
+			chanID)
+	}
+
+	// If we're being sent a new channel, and our existing channel doesn't
+	// have the next revocation, then we need to update the current
+	// existing channel.
+	if currentChan.RemoteNextRevocation() != nil {
+		return nil
+	}
+
+	p.log.Infof("Processing retransmitted ChannelReady for "+
+		"ChannelPoint(%v)", chanPoint)
+
+	nextRevoke := c.RemoteNextRevocation
+
+	err := currentChan.InitNextRevocation(nextRevoke)
+	if err != nil {
+		return fmt.Errorf("unable to init next revocation: %w", err)
+	}
+
+	return nil
+}
+
+// addActiveChannel adds a new active channel to the `activeChannels` map. It
+// takes a `channeldb.OpenChannel`, creates a `lnwallet.LightningChannel` from
+// it and assembles it with a channel link.
+func (p *Brontide) addActiveChannel(c *lnpeer.NewChannel) error {
+	chanPoint := &c.FundingOutpoint
+	chanID := lnwire.NewChanIDFromOutPoint(chanPoint)
+
+	// If not already active, we'll add this channel to the set of active
+	// channels, so we can look it up later easily according to its channel
+	// ID.
+	lnChan, err := lnwallet.NewLightningChannel(
+		p.cfg.Signer, c.OpenChannel,
+		p.cfg.SigPool, c.ChanOpts...,
+	)
+	if err != nil {
+		return fmt.Errorf("unable to create LightningChannel: %w", err)
+	}
+
+	// If we've reached this point, there are two possible scenarios.  If
+	// the channel was in the active channels map as nil, then it was
+	// loaded from disk and we need to send reestablish. Else, it was not
+	// loaded from disk and we don't need to send reestablish as this is a
+	// fresh channel.
+	shouldReestablish := p.isLoadedFromDisk(chanID)
+
+	// Store the channel in the activeChannels map.
+	p.activeChannels.Store(chanID, lnChan)
+
+	p.log.Infof("New channel active ChannelPoint(%v) with peer", chanPoint)
+
+	// Next, we'll assemble a ChannelLink along with the necessary items it
+	// needs to function.
+	chainEvents, err := p.cfg.ChainArb.SubscribeChannelEvents(*chanPoint)
+	if err != nil {
+		return fmt.Errorf("unable to subscribe to chain events: %w",
+			err)
+	}
+
+	// We'll query the channel DB for the new channel's initial forwarding
+	// policies to determine the policy we start out with.
+	initialPolicy, err := p.cfg.ChannelDB.GetInitialForwardingPolicy(chanID)
+	if err != nil {
+		return fmt.Errorf("unable to query for initial forwarding "+
+			"policy: %v", err)
+	}
+
+	// Create the link and add it to the switch.
+	err = p.addLink(
+		chanPoint, lnChan, initialPolicy, chainEvents,
+		shouldReestablish,
+	)
+	if err != nil {
+		return fmt.Errorf("can't register new channel link(%v) with "+
+			"peer", chanPoint)
+	}
+
+	return nil
+}
+
+// handleNewActiveChannel handles a `newChannelMsg` request. Depending on we
+// know this channel ID or not, we'll either add it to the `activeChannels` map
+// or init the next revocation for it.
+func (p *Brontide) handleNewActiveChannel(req *newChannelMsg) {
+	newChan := req.channel
+	chanPoint := &newChan.FundingOutpoint
+	chanID := lnwire.NewChanIDFromOutPoint(chanPoint)
+
+	// Only update RemoteNextRevocation if the channel is in the
+	// activeChannels map and if we added the link to the switch. Only
+	// active channels will be added to the switch.
+	if p.isActiveChannel(chanID) {
+		p.log.Infof("Already have ChannelPoint(%v), ignoring",
+			chanPoint)
+
+		// Handle it and close the err chan on the request.
+		close(req.err)
+
+		// Update the next revocation point.
+		err := p.updateNextRevocation(newChan.OpenChannel)
+		if err != nil {
+			p.log.Errorf(err.Error())
+		}
+
+		return
+	}
+
+	// This is a new channel, we now add it to the map.
+	if err := p.addActiveChannel(req.channel); err != nil {
+		// Log and send back the error to the request.
+		p.log.Errorf(err.Error())
+		req.err <- err
+
+		return
+	}
+
+	// Close the err chan if everything went fine.
+	close(req.err)
+}
+
+// handleNewPendingChannel takes a `newChannelMsg` request and add it to
+// `activeChannels` map with nil value. This pending channel will be saved as
+// it may become active in the future. Once active, the funding manager will
+// send it again via `AddNewChannel`, and we'd handle the link creation there.
+func (p *Brontide) handleNewPendingChannel(req *newChannelMsg) {
+	defer close(req.err)
+
+	chanID := req.channelID
+
+	// If we already have this channel, something is wrong with the funding
+	// flow as it will only be marked as active after `ChannelReady` is
+	// handled. In this case, we will do nothing but log an error, just in
+	// case this is a legit channel.
+	if p.isActiveChannel(chanID) {
+		p.log.Errorf("Channel(%v) is already active, ignoring "+
+			"pending channel request", chanID)
+
+		return
+	}
+
+	// The channel has already been added, we will do nothing and return.
+	if p.isPendingChannel(chanID) {
+		p.log.Infof("Channel(%v) is already added, ignoring "+
+			"pending channel request", chanID)
+
+		return
+	}
+
+	// This is a new channel, we now add it to the map `activeChannels`
+	// with nil value and mark it as a newly added channel in
+	// `addedChannels`.
+	p.activeChannels.Store(chanID, nil)
+	p.addedChannels.Store(chanID, struct{}{})
+}
+
+// handleRemovePendingChannel takes a `newChannelMsg` request and removes it
+// from `activeChannels` map. The request will be ignored if the channel is
+// considered active by Brontide. Noop if the channel ID cannot be found.
+func (p *Brontide) handleRemovePendingChannel(req *newChannelMsg) {
+	defer close(req.err)
+
+	chanID := req.channelID
+
+	// If we already have this channel, something is wrong with the funding
+	// flow as it will only be marked as active after `ChannelReady` is
+	// handled. In this case, we will log an error and exit.
+	if p.isActiveChannel(chanID) {
+		p.log.Errorf("Channel(%v) is active, ignoring remove request",
+			chanID)
+		return
+	}
+
+	// The channel has not been added yet, we will log a warning as there
+	// is an unexpected call from funding manager.
+	if !p.isPendingChannel(chanID) {
+		p.log.Warnf("Channel(%v) not found, removing it anyway", chanID)
+	}
+
+	// Remove the record of this pending channel.
+	p.activeChannels.Delete(chanID)
+	p.addedChannels.Delete(chanID)
+}
+
+// sendLinkUpdateMsg sends a message that updates the channel to the
+// channel's message stream.
+func (p *Brontide) sendLinkUpdateMsg(cid lnwire.ChannelID, msg lnwire.Message) {
+	p.log.Tracef("Sending link update msg=%v", msg.MsgType())
+
+	chanStream, ok := p.activeMsgStreams[cid]
+	if !ok {
+		// If a stream hasn't yet been created, then we'll do so, add
+		// it to the map, and finally start it.
+		chanStream = newChanMsgStream(p, cid)
+		p.activeMsgStreams[cid] = chanStream
+		chanStream.Start()
+
+		// Stop the stream when quit.
+		go func() {
+			<-p.quit
+			chanStream.Stop()
+		}()
+	}
+
+	// With the stream obtained, add the message to the stream so we can
+	// continue processing message.
+	chanStream.AddMsg(msg)
 }

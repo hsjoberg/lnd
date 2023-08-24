@@ -32,8 +32,8 @@ all unconfirmed transactions are rebroadcast on start up.
 
 ## RPC
 
-* The `RegisterConfirmationsNtfn` call of the `chainnotifier` RPC sub-server 
- [now optionally supports returning the entire block that confirmed the 
+* The `RegisterConfirmationsNtfn` call of the `chainnotifier` RPC sub-server
+ [now optionally supports returning the entire block that confirmed the
  transaction](https://github.com/lightningnetwork/lnd/pull/6730).
 
 * [Add `macaroon_root_key` field to
@@ -62,7 +62,7 @@ all unconfirmed transactions are rebroadcast on start up.
   receiver will lose it. Therefore the receiver can just as well fail off-chain
   a few blocks before so that the channel is saved.
 
-* [Make remote channel reserve amount configurable for 
+* [Make remote channel reserve amount configurable for
   `openchannel`](https://github.com/lightningnetwork/lnd/pull/6956)
 
 * [`ForwardingHistory` ](https://github.com/lightningnetwork/lnd/pull/7001) now
@@ -111,16 +111,16 @@ all unconfirmed transactions are rebroadcast on start up.
   GetBlock, GetBestBlock, GetBlockHash. These endpoints provide access to chain
   block data.
 
-* [`QueryProbabiltiy` is deprecated. Internal mission control state can be 
+* [`QueryProbabiltiy` is deprecated. Internal mission control state can be
   obtained via `QueryMissionControl`.](
   https://github.com/lightningnetwork/lnd/pull/6857)
 
-* [Ensure that closing addresses match the node network for `OpenChannel` 
+* [Ensure that closing addresses match the node network for `OpenChannel`
   requests](https://github.com/lightningnetwork/lnd/pull/7272)
 
 * The `SendCustomMessage` and `SubscribeCustomMessage` APIs can now be used to
   send and receive custom messages below the custom range if lnd is built with
-  the `dev` tag, and configured to [opt into overriding a specific message 
+  the `dev` tag, and configured to [opt into overriding a specific message
   type](https://github.com/lightningnetwork/lnd/pull/7153)
 
 * [Sign/Verify messages and signatures for single
@@ -144,9 +144,9 @@ all unconfirmed transactions are rebroadcast on start up.
 * [A bug has been fixed which could cause `lnd` to crash when parsing a
   malformed HTLC intercept message](https://github.com/lightningnetwork/lnd/pull/7392).
 
-* [A bug](https://github.com/lightningnetwork/lnd/pull/7408) in the 
+* [A bug](https://github.com/lightningnetwork/lnd/pull/7408) in the
   `updatenodeannouncement` peers cli which did not allow setting/
-   unsetting of feature bits also has been fixed. 
+   unsetting of feature bits also has been fixed.
 
 * [Enrich the `Channel` message with a peers' alias in order to retrieve it
   in `ListChannels`.](https://github.com/lightningnetwork/lnd/pull/7322) This
@@ -205,8 +205,8 @@ https://github.com/lightningnetwork/lnd/pull/7359)
 
 ## Invoices
 
-* Define a new [InvoiceDB](https://github.com/lightningnetwork/lnd/pull/7215) 
-interface to be used in all the packages that need to interact with invoice 
+* Define a new [InvoiceDB](https://github.com/lightningnetwork/lnd/pull/7215)
+interface to be used in all the packages that need to interact with invoice
 data.
 
 ## Misc
@@ -230,7 +230,7 @@ data.
   [With the module updated](https://github.com/lightningnetwork/lnd/pull/6836),
   `lnd` now parses Tor control port messages correctly.
 
-* [Add option to encrypt Tor private 
+* [Add option to encrypt Tor private
   key](https://github.com/lightningnetwork/lnd/pull/6500), and [update the Tor
   module](https://github.com/lightningnetwork/lnd/pull/6526) to pave the way for
   this functionality.
@@ -271,9 +271,9 @@ data.
 * [Updated several tlv stream-decoding callsites to use tlv/v1.1.0 P2P variants
   for untrusted input.](https://github.com/lightningnetwork/lnd/pull/7227)
 
-* [Prevent nil pointer dereference during funding manager 
+* [Prevent nil pointer dereference during funding manager
   test](https://github.com/lightningnetwork/lnd/pull/7268)
-  
+
 * Fixed a [failure message parsing bug](https://github.com/lightningnetwork/lnd/pull/7262)
   that caused additional failure message data to be interpreted as being part of
   a channel update.
@@ -288,7 +288,7 @@ data.
 
 * [Fix gomnd linter error](https://github.com/lightningnetwork/lnd/pull/7325)
 
-* [Fix race condition in 
+* [Fix race condition in
 `TestUpdatePaymentState`](https://github.com/lightningnetwork/lnd/pull/7336)
 
 * [Decreased the mutex lock
@@ -297,7 +297,7 @@ data.
 * [Add Custom Message to the fuzz testsuite
 in the lnwire package](https://github.com/lightningnetwork/lnd/pull/7303)
 
-* [Remove non-existent Cleanup calls from etcd test code in the `kvdb` 
+* [Remove non-existent Cleanup calls from etcd test code in the `kvdb`
   package](https://github.com/lightningnetwork/lnd/pull/7352)
 
 * [A bug has been fixed where a reorg would cause zero-conf channels to be deleted
@@ -322,7 +322,7 @@ in the lnwire package](https://github.com/lightningnetwork/lnd/pull/7303)
 * [Fix](https://github.com/lightningnetwork/lnd/pull/6858) command line argument
   parsing for `lncli sendpayment`.
 
-* [Fix](https://github.com/lightningnetwork/lnd/pull/6875) mapslice cap out of 
+* [Fix](https://github.com/lightningnetwork/lnd/pull/6875) mapslice cap out of
   range error that occurs if the number of profiles is zero.
 
 * [A new config option, `batchwindowduration` has been added to
@@ -330,7 +330,7 @@ in the lnwire package](https://github.com/lightningnetwork/lnd/pull/7303)
   customize sweeper batch duration.
 
 * [Add `base_fee_msat` and `fee_rate_ppm` flags to
-  `openchannel`](https://github.com/lightningnetwork/lnd/pull/6753) requests 
+  `openchannel`](https://github.com/lightningnetwork/lnd/pull/6753) requests
   so that the user can specify fees during channel creation time in addition
   to the default configuration.
 
@@ -342,7 +342,7 @@ in the lnwire package](https://github.com/lightningnetwork/lnd/pull/7303)
   `htlcswitch`](https://github.com/lightningnetwork/lnd/pull/7066).
 
 * [Label the openchannel tx first before notifying the channel open
-  event.](https://github.com/lightningnetwork/lnd/pull/7158) 
+  event.](https://github.com/lightningnetwork/lnd/pull/7158)
 
 * [Add check for `pay_req` argument in `sendpayment` and `decodepayreq`
   commands to trim "lightning:" prefix before processing the request](
@@ -364,11 +364,11 @@ in the lnwire package](https://github.com/lightningnetwork/lnd/pull/7303)
 
 * During reconnection, enabling channels might be failed due to the startup of
   link is falling behind, which is now fixed by [retrying the enable
-  request](https://github.com/lightningnetwork/lnd/pull/7157). 
+  request](https://github.com/lightningnetwork/lnd/pull/7157).
 
 * [Sign/Verify messages and signatures for single
   addresses](https://github.com/lightningnetwork/lnd/pull/7231).
-  
+
 * [Allow `--stateless_init` mode to be used for watch-only
   wallets](https://github.com/lightningnetwork/lnd/pull/7462).
 
@@ -380,7 +380,7 @@ in the lnwire package](https://github.com/lightningnetwork/lnd/pull/7303)
 * [The `tlv` package now allows decoding records larger than 65535 bytes. The
   caller is expected to know that doing so with untrusted input is
   unsafe.](https://github.com/lightningnetwork/lnd/pull/6779)
- 
+
 * [test: replace defer cleanup with
   `t.Cleanup`](https://github.com/lightningnetwork/lnd/pull/6864).
 
@@ -400,7 +400,7 @@ in the lnwire package](https://github.com/lightningnetwork/lnd/pull/7303)
 * [Fixed a test closure](https://github.com/lightningnetwork/lnd/pull/7337)
   issue found in `bitcoindnotify/bitcoind_test.go`.
 
-* Add methods to easily check if an invoice [is AMP or 
+* Add methods to easily check if an invoice [is AMP or
   Keysend](https://github.com/lightningnetwork/lnd/pull/7334).
 
 * [Fixed a unit test flake in the wallet
@@ -411,14 +411,14 @@ in the lnwire package](https://github.com/lightningnetwork/lnd/pull/7303)
 
 ## Watchtowers
 
-* [Create a towerID-to-sessionID index in the wtclient DB to improve the 
+* [Create a towerID-to-sessionID index in the wtclient DB to improve the
   speed of listing sessions for a particular tower ID](
-  https://github.com/lightningnetwork/lnd/pull/6972). This PR also ensures a 
+  https://github.com/lightningnetwork/lnd/pull/6972). This PR also ensures a
   closer coupling of Towers and Sessions and ensures that a session cannot be
-  added if the tower it is referring to does not exist. A [follow-up migration 
-  was added](https://github.com/lightningnetwork/lnd/pull/7491) to ensure that 
+  added if the tower it is referring to does not exist. A [follow-up migration
+  was added](https://github.com/lightningnetwork/lnd/pull/7491) to ensure that
   entries are added to the new index for _all_ towers in the db, including those
-  for which there are not yet associated sessions. 
+  for which there are not yet associated sessions.
 
 * [Remove `AckedUpdates` & `CommittedUpdates` from the `ClientSession`
   struct](https://github.com/lightningnetwork/lnd/pull/6928) in order to
@@ -434,7 +434,7 @@ in the lnwire package](https://github.com/lightningnetwork/lnd/pull/7303)
 
 ## DB
 
-* [Add a sqlite backend 
+* [Add a sqlite backend
   option](https://github.com/lightningnetwork/lnd/pull/7251) to the kvdb
   package, and add it as a [backend option to
   LND](https://github.com/lightningnetwork/lnd/pull/7252). Note that with this
@@ -445,11 +445,11 @@ in the lnwire package](https://github.com/lightningnetwork/lnd/pull/7303)
   3.5.7](https://github.com/lightningnetwork/lnd/pull/7353) to resolve linking
   issues with outdated dependencies.
 
-* [Re-add local and remote output amounts to the revocation 
-  log](https://github.com/lightningnetwork/lnd/pull/7379) and add a new 
-  `--db.no-rev-log-amt-data` flag that can be used to explicitly opt out of  
-  storing this extra data. It should be noted that setting this flag is not 
-  recommended unless the user is sure that they will never activate their 
+* [Re-add local and remote output amounts to the revocation
+  log](https://github.com/lightningnetwork/lnd/pull/7379) and add a new
+  `--db.no-rev-log-amt-data` flag that can be used to explicitly opt out of
+  storing this extra data. It should be noted that setting this flag is not
+  recommended unless the user is sure that they will never activate their
   watchtower client (`--wtclient.active`) in the future. The new flag can not
   be set at all if the `--wtclient.active` flag has been set.
 
@@ -460,7 +460,7 @@ in the lnwire package](https://github.com/lightningnetwork/lnd/pull/7303)
 * [A new probability model ("bimodal") is added which models channel based
   liquidities within a probability theory framework.](
   https://github.com/lightningnetwork/lnd/pull/6815)
-* [The a priori capacity factor is made configurable and its effect is 
+* [The a priori capacity factor is made configurable and its effect is
   limited.](https://github.com/lightningnetwork/lnd/pull/7444)
 * Local edges and hop hints [are extended with a
   capacity](https://github.com/lightningnetwork/lnd/pull/7520) to avoid channel
@@ -494,10 +494,10 @@ in the lnwire package](https://github.com/lightningnetwork/lnd/pull/7303)
   code style or to [disable annoying new
   linters](https://github.com/lightningnetwork/lnd/pull/7335).
 
-* Update github actions to [check commits against the target base 
-  branch](https://github.com/lightningnetwork/lnd/pull/7103) rather than just 
-  using the master branch. And [skip the commit 
-  check](https://github.com/lightningnetwork/lnd/pull/7114) for all non-PR 
+* Update github actions to [check commits against the target base
+  branch](https://github.com/lightningnetwork/lnd/pull/7103) rather than just
+  using the master branch. And [skip the commit
+  check](https://github.com/lightningnetwork/lnd/pull/7114) for all non-PR
   events. The Golang build cache [was also optimized to speed up tests and
   builds](https://github.com/lightningnetwork/lnd/pull/7295).
 
@@ -505,7 +505,11 @@ in the lnwire package](https://github.com/lightningnetwork/lnd/pull/7303)
   [`tools`](https://github.com/lightningnetwork/lnd/pull/7254) and golangci
   issue where [it cannot fetch
   commits](https://github.com/lightningnetwork/lnd/pull/7374).
-  
+
+* [Update Postgres.md](https://github.com/lightningnetwork/lnd/pull/7442)
+  to clarify how the database is currently used as a Key-Value store, but
+  in the future will have new schema introduced.
+
 ### Integration test
 
 * The `lntest` has been

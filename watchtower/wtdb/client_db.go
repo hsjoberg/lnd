@@ -94,6 +94,10 @@ var (
 	// 	db-session-id -> last-channel-close-height
 	cClosableSessionsBkt = []byte("client-closable-sessions-bucket")
 
+	// cTaskQueue is a top-level bucket where the disk queue may store its
+	// content.
+	cTaskQueue = []byte("client-task-queue")
+
 	// ErrTowerNotFound signals that the target tower was not found in the
 	// database.
 	ErrTowerNotFound = errors.New("tower not found")
@@ -2057,6 +2061,51 @@ func (c *ClientDB) AckUpdate(id *SessionID, seqNum uint16,
 		}
 
 		return index.Add(height, rangesBkt)
+	}, func() {})
+}
+
+// GetDBQueue returns a BackupID Queue instance under the given namespace.
+func (c *ClientDB) GetDBQueue(namespace []byte) Queue[*BackupID] {
+	return NewQueueDB[*BackupID](
+		c.db, namespace, func() *BackupID {
+			return &BackupID{}
+		},
+	)
+}
+
+// DeleteCommittedUpdate deletes the committed update with the given sequence
+// number from the given session.
+func (c *ClientDB) DeleteCommittedUpdate(id *SessionID, seqNum uint16) error {
+	return kvdb.Update(c.db, func(tx kvdb.RwTx) error {
+		sessions := tx.ReadWriteBucket(cSessionBkt)
+		if sessions == nil {
+			return ErrUninitializedDB
+		}
+
+		sessionBkt := sessions.NestedReadWriteBucket(id[:])
+		if sessionBkt == nil {
+			return fmt.Errorf("session bucket %s not found",
+				id.String())
+		}
+
+		// If the commits sub-bucket doesn't exist, there can't possibly
+		// be a corresponding update to remove.
+		sessionCommits := sessionBkt.NestedReadWriteBucket(
+			cSessionCommits,
+		)
+		if sessionCommits == nil {
+			return ErrCommittedUpdateNotFound
+		}
+
+		var seqNumBuf [2]byte
+		byteOrder.PutUint16(seqNumBuf[:], seqNum)
+
+		if sessionCommits.Get(seqNumBuf[:]) == nil {
+			return ErrCommittedUpdateNotFound
+		}
+
+		// Remove the corresponding committed update.
+		return sessionCommits.Delete(seqNumBuf[:])
 	}, func() {})
 }
 

@@ -11,9 +11,9 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
-	_ "net/http/pprof" // nolint:gosec // used to set up profiling HTTP handlers.
+	"net/http/pprof"
 	"os"
-	"runtime/pprof"
+	runtimePprof "runtime/pprof"
 	"strings"
 	"sync"
 	"time"
@@ -37,7 +37,7 @@ import (
 	"github.com/lightningnetwork/lnd/watchtower"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/grpc/keepalive"
 	"gopkg.in/macaroon-bakery.v2/bakery"
 	"gopkg.in/macaroon.v2"
 )
@@ -180,14 +180,52 @@ func Main(cfg *Config, lisCfg ListenerCfg, implCfg *ImplementationCfg,
 		network,
 	)
 
+	ctx := context.Background()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	// Enable http profiling server if requested.
 	if cfg.Profile != "" {
+		// Create the http handler.
+		pprofMux := http.NewServeMux()
+		pprofMux.HandleFunc("/debug/pprof/", pprof.Index)
+		pprofMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		pprofMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		pprofMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		pprofMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+
+		// Redirect all requests to the pprof handler, thus visiting
+		// `127.0.0.1:6060` will be redirected to
+		// `127.0.0.1:6060/debug/pprof`.
+		pprofMux.Handle("/", http.RedirectHandler(
+			"/debug/pprof/", http.StatusSeeOther,
+		))
+
+		ltndLog.Infof("Pprof listening on %v", cfg.Profile)
+
+		// Create the pprof server.
+		pprofServer := &http.Server{
+			Addr:              cfg.Profile,
+			Handler:           pprofMux,
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+
+		// Shut the server down when lnd is shutting down.
+		defer func() {
+			ltndLog.Info("Stopping pprof server...")
+			err := pprofServer.Shutdown(ctx)
+			if err != nil {
+				ltndLog.Errorf("Stop pprof server got err: %v",
+					err)
+			}
+		}()
+
+		// Start the pprof server.
 		go func() {
-			profileRedirect := http.RedirectHandler("/debug/pprof",
-				http.StatusSeeOther)
-			http.Handle("/", profileRedirect)
-			ltndLog.Infof("Pprof listening on %v", cfg.Profile)
-			fmt.Println(http.ListenAndServe(cfg.Profile, nil))
+			err := pprofServer.ListenAndServe()
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				ltndLog.Errorf("Serving pprof got err: %v", err)
+			}
 		}()
 	}
 
@@ -197,14 +235,12 @@ func Main(cfg *Config, lisCfg ListenerCfg, implCfg *ImplementationCfg,
 		if err != nil {
 			return mkErr("unable to create CPU profile: %v", err)
 		}
-		pprof.StartCPUProfile(f)
-		defer f.Close()
-		defer pprof.StopCPUProfile()
+		_ = runtimePprof.StartCPUProfile(f)
+		defer func() {
+			_ = f.Close()
+		}()
+		defer runtimePprof.StopCPUProfile()
 	}
-
-	ctx := context.Background()
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 
 	// Run configuration dependent DB pre-initialization. Note that this
 	// needs to be done early and once during the startup process, before
@@ -280,10 +316,23 @@ func Main(cfg *Config, lisCfg ListenerCfg, implCfg *ImplementationCfg,
 		}
 	}()
 
+	// Allow the user to overwrite some defaults of the gRPC library related
+	// to connection keepalive (server side and client side pings).
+	serverKeepalive := keepalive.ServerParameters{
+		Time:    cfg.GRPC.ServerPingTime,
+		Timeout: cfg.GRPC.ServerPingTimeout,
+	}
+	clientKeepalive := keepalive.EnforcementPolicy{
+		MinTime:             cfg.GRPC.ClientPingMinWait,
+		PermitWithoutStream: cfg.GRPC.ClientAllowPingWithoutStream,
+	}
+
 	rpcServerOpts := interceptorChain.CreateServerOpts()
 	serverOpts = append(serverOpts, rpcServerOpts...)
 	serverOpts = append(
 		serverOpts, grpc.MaxRecvMsgSize(lnrpc.MaxGrpcMsgSize),
+		grpc.KeepaliveParams(serverKeepalive),
+		grpc.KeepaliveEnforcementPolicy(clientKeepalive),
 	)
 
 	grpcServer := grpc.NewServer(serverOpts...)
@@ -598,11 +647,14 @@ func Main(cfg *Config, lisCfg ListenerCfg, implCfg *ImplementationCfg,
 			return nil
 		}
 
-		synced, _, err := activeChainControl.Wallet.IsSynced()
+		synced, ts, err := activeChainControl.Wallet.IsSynced()
 		if err != nil {
 			return mkErr("unable to determine if wallet is "+
 				"synced: %v", err)
 		}
+
+		ltndLog.Debugf("Syncing to block timestamp: %v, is synced=%v",
+			time.Unix(ts, 0), synced)
 
 		if synced {
 			break
@@ -666,46 +718,64 @@ func bakeMacaroon(ctx context.Context, svc *macaroons.Service,
 	return mac.M().MarshalBinary()
 }
 
-// genMacaroons generates three macaroon files; one admin-level, one for
-// invoice access and one read-only. These can also be used to generate more
-// granular macaroons.
-func genMacaroons(ctx context.Context, svc *macaroons.Service,
+// saveMacaroon bakes a macaroon with the specified macaroon permissions and
+// writes it to a file with the given filename and file permissions.
+func saveMacaroon(ctx context.Context, svc *macaroons.Service, filename string,
+	macaroonPermissions []bakery.Op, filePermissions os.FileMode) error {
+
+	macaroonBytes, err := bakeMacaroon(ctx, svc, macaroonPermissions)
+	if err != nil {
+		return err
+	}
+	err = os.WriteFile(filename, macaroonBytes, filePermissions)
+	if err != nil {
+		_ = os.Remove(filename)
+		return err
+	}
+
+	return nil
+}
+
+// genDefaultMacaroons checks for three default macaroon files and generates
+// them if they do not exist; one admin-level, one for invoice access and one
+// read-only. Each macaroon is checked and created independently to ensure all
+// three exist. The admin macaroon can also be used to generate more granular
+// macaroons.
+func genDefaultMacaroons(ctx context.Context, svc *macaroons.Service,
 	admFile, roFile, invoiceFile string) error {
 
 	// First, we'll generate a macaroon that only allows the caller to
 	// access invoice related calls. This is useful for merchants and other
 	// services to allow an isolated instance that can only query and
 	// modify invoices.
-	invoiceMacBytes, err := bakeMacaroon(ctx, svc, invoicePermissions)
-	if err != nil {
-		return err
-	}
-	err = ioutil.WriteFile(invoiceFile, invoiceMacBytes, 0644)
-	if err != nil {
-		_ = os.Remove(invoiceFile)
-		return err
+	if !lnrpc.FileExists(invoiceFile) {
+		err := saveMacaroon(
+			ctx, svc, invoiceFile, invoicePermissions, 0644,
+		)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Generate the read-only macaroon and write it to a file.
-	roBytes, err := bakeMacaroon(ctx, svc, readPermissions)
-	if err != nil {
-		return err
-	}
-	if err = ioutil.WriteFile(roFile, roBytes, 0644); err != nil {
-		_ = os.Remove(roFile)
-		return err
+	if !lnrpc.FileExists(roFile) {
+		err := saveMacaroon(
+			ctx, svc, roFile, readPermissions, 0644,
+		)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Generate the admin macaroon and write it to a file.
-	admBytes, err := bakeMacaroon(ctx, svc, adminPermissions())
-	if err != nil {
-		return err
-	}
-
-	err = ioutil.WriteFile(admFile, admBytes, adminMacaroonFilePermissions)
-	if err != nil {
-		_ = os.Remove(admFile)
-		return err
+	if !lnrpc.FileExists(admFile) {
+		err := saveMacaroon(
+			ctx, svc, admFile, adminPermissions(),
+			adminMacaroonFilePermissions,
+		)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -815,10 +885,8 @@ func startRestProxy(cfg *Config, rpcServer *rpcServer, restDialOpts []grpc.DialO
 	// that the marshaler prints all values, even if they are falsey.
 	customMarshalerOption := proxy.WithMarshalerOption(
 		proxy.MIMEWildcard, &proxy.JSONPb{
-			MarshalOptions: protojson.MarshalOptions{
-				UseProtoNames:   true,
-				EmitUnpopulated: true,
-			},
+			MarshalOptions:   *lnrpc.RESTJsonMarshalOpts,
+			UnmarshalOptions: *lnrpc.RESTJsonUnmarshalOpts,
 		},
 	)
 	mux := proxy.NewServeMux(
@@ -833,14 +901,7 @@ func startRestProxy(cfg *Config, rpcServer *rpcServer, restDialOpts []grpc.DialO
 	)
 
 	// Register our services with the REST proxy.
-	err := lnrpc.RegisterStateHandlerFromEndpoint(
-		ctx, mux, restProxyDest, restDialOpts,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	err = rpcServer.RegisterWithRestProxy(
+	err := rpcServer.RegisterWithRestProxy(
 		ctx, mux, restDialOpts, restProxyDest,
 	)
 	if err != nil {

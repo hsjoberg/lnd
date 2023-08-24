@@ -2,19 +2,18 @@ package itest
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
-	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/btcsuite/btcd/integration/rpctest"
 	"github.com/lightningnetwork/lnd/chainreg"
 	"github.com/lightningnetwork/lnd/funding"
 	"github.com/lightningnetwork/lnd/lnrpc"
+	"github.com/lightningnetwork/lnd/lnrpc/routerrpc"
 	"github.com/lightningnetwork/lnd/lntest"
 	"github.com/lightningnetwork/lnd/lntest/node"
 	"github.com/lightningnetwork/lnd/lntest/rpc"
-	"github.com/lightningnetwork/lnd/lntest/wait"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,43 +28,11 @@ func testOpenChannelAfterReorg(ht *lntest.HarnessTest) {
 		ht.Skipf("skipping reorg test for neutrino backend")
 	}
 
-	temp := "temp"
-
-	// Set up a new miner that we can use to cause a reorg.
-	tempLogDir := ".tempminerlogs"
-	logFilename := "output-open_channel_reorg-temp_miner.log"
-	tempMiner := lntest.NewTempMiner(
-		ht.Context(), ht.T, tempLogDir, logFilename,
-	)
-	defer tempMiner.Stop()
-
-	// Setup the temp miner
-	require.NoError(ht, tempMiner.SetUp(false, 0),
-		"unable to set up mining node")
+	// Create a temp miner.
+	tempMiner := ht.Miner.SpawnTempMiner()
 
 	miner := ht.Miner
 	alice, bob := ht.Alice, ht.Bob
-
-	// We start by connecting the new miner to our original miner,
-	// such that it will sync to our original chain.
-	err := miner.Client.Node(
-		btcjson.NConnect, tempMiner.P2PAddress(), &temp,
-	)
-	require.NoError(ht, err, "unable to connect miners")
-
-	nodeSlice := []*rpctest.Harness{miner.Harness, tempMiner.Harness}
-	err = rpctest.JoinNodes(nodeSlice, rpctest.Blocks)
-	require.NoError(ht, err, "unable to join node on blocks")
-
-	// The two miners should be on the same blockheight.
-	assertMinerBlockHeightDelta(ht, miner, tempMiner, 0)
-
-	// We disconnect the two miners, such that we can mine two different
-	// chains and can cause a reorg later.
-	err = miner.Client.Node(
-		btcjson.NDisconnect, tempMiner.P2PAddress(), &temp,
-	)
-	require.NoError(ht, err, "unable to disconnect miners")
 
 	// Create a new channel that requires 1 confs before it's considered
 	// open, then broadcast the funding transaction
@@ -97,7 +64,7 @@ func testOpenChannelAfterReorg(ht *lntest.HarnessTest) {
 
 	// Ensure the chain lengths are what we expect, with the temp miner
 	// being 5 blocks ahead.
-	assertMinerBlockHeightDelta(ht, miner, tempMiner, 5)
+	miner.AssertMinerBlockHeightDelta(tempMiner, 5)
 
 	chanPoint := &lnrpc.ChannelPoint{
 		FundingTxid: &lnrpc.ChannelPoint_FundingTxidBytes{
@@ -124,22 +91,14 @@ func testOpenChannelAfterReorg(ht *lntest.HarnessTest) {
 
 	// Connecting to the temporary miner should now cause our original
 	// chain to be re-orged out.
-	err = miner.Client.Node(btcjson.NConnect, tempMiner.P2PAddress(), &temp)
-	require.NoError(ht, err, "unable to connect temp miner")
-
-	nodes := []*rpctest.Harness{tempMiner.Harness, miner.Harness}
-	err = rpctest.JoinNodes(nodes, rpctest.Blocks)
-	require.NoError(ht, err, "unable to join node on blocks")
+	miner.ConnectMiner(tempMiner)
 
 	// Once again they should be on the same chain.
-	assertMinerBlockHeightDelta(ht, miner, tempMiner, 0)
+	miner.AssertMinerBlockHeightDelta(tempMiner, 0)
 
 	// Now we disconnect the two miners, and connect our original miner to
 	// our chain backend once again.
-	err = miner.Client.Node(
-		btcjson.NDisconnect, tempMiner.P2PAddress(), &temp,
-	)
-	require.NoError(ht, err, "unable to disconnect temp miner")
+	miner.DisconnectMiner(tempMiner)
 
 	ht.ConnectMiner()
 
@@ -373,15 +332,31 @@ func runBasicChannelCreationAndUpdates(ht *lntest.HarnessTest,
 	aliceChanSub := alice.RPC.SubscribeChannelEvents()
 
 	// Open the channels between Alice and Bob, asserting that the channels
-	// have been properly opened on-chain.
+	// have been properly opened on-chain. We also attach the optional Memo
+	// argument to one of the channels so we can test that it can be
+	// retrieved correctly when querying the created channel.
 	chanPoints := make([]*lnrpc.ChannelPoint, numChannels)
+	openChannelParams := []lntest.OpenChannelParams{
+		{Amt: amount, Memo: "bob is a good peer"},
+		{Amt: amount},
+	}
 	for i := 0; i < numChannels; i++ {
 		chanPoints[i] = ht.OpenChannel(
-			alice, bob, lntest.OpenChannelParams{
-				Amt: amount,
-			},
+			alice, bob, openChannelParams[i],
 		)
 	}
+
+	// Alice should see the memo when retrieving the first channel.
+	channel := ht.QueryChannelByChanPoint(alice, chanPoints[0])
+	require.Equal(ht, "bob is a good peer", channel.Memo)
+
+	// Bob shouldn't see the memo since it's for Alice only.
+	channel = ht.QueryChannelByChanPoint(bob, chanPoints[0])
+	require.Empty(ht, channel.Memo, "Memo is not empty")
+
+	// The second channel doesn't have a memo.
+	channel = ht.QueryChannelByChanPoint(alice, chanPoints[1])
+	require.Empty(ht, channel.Memo, "Memo is not empty")
 
 	// Since each of the channels just became open, Bob and Alice should
 	// each receive an open and an active notification for each channel.
@@ -445,6 +420,16 @@ func runBasicChannelCreationAndUpdates(ht *lntest.HarnessTest,
 		}
 	}
 
+	// If Bob now tries to open a channel with an invalid memo, reject it.
+	invalidMemo := strings.Repeat("a", 501)
+	params := lntest.OpenChannelParams{
+		Amt:  funding.MaxBtcFundingAmount,
+		Memo: invalidMemo,
+	}
+	expErr := fmt.Errorf("provided memo (%s) is of length 501, exceeds 500",
+		invalidMemo)
+	ht.OpenChannelAssertErr(bob, alice, params, expErr)
+
 	// verifyCloseUpdatesReceived is used to verify that Alice and Bob
 	// receive the correct channel updates in order.
 	const numExpectedCloseUpdates = 3 * numChannels
@@ -504,34 +489,192 @@ func runBasicChannelCreationAndUpdates(ht *lntest.HarnessTest,
 	)
 }
 
-// assertMinerBlockHeightDelta ensures that tempMiner is 'delta' blocks ahead
-// of miner.
-func assertMinerBlockHeightDelta(ht *lntest.HarnessTest,
-	miner, tempMiner *lntest.HarnessMiner, delta int32) {
+// testUpdateOnPendingOpenChannels checks that `update_add_htlc` followed by
+// `channel_ready` is properly handled. In specific, when a node is in a state
+// that it's still processing a remote `channel_ready` message, meanwhile an
+// `update_add_htlc` is received, this HTLC message is cached and settled once
+// processing `channel_ready` is complete.
+func testUpdateOnPendingOpenChannels(ht *lntest.HarnessTest) {
+	// Test funder's behavior. Funder sees the channel pending, but fundee
+	// sees it active and sends an HTLC.
+	ht.Run("pending on funder side", func(t *testing.T) {
+		st := ht.Subtest(t)
+		testUpdateOnFunderPendingOpenChannels(st)
+	})
 
-	// Ensure the chain lengths are what we expect.
-	err := wait.NoError(func() error {
-		_, tempMinerHeight, err := tempMiner.Client.GetBestBlock()
-		if err != nil {
-			return fmt.Errorf("unable to get current "+
-				"blockheight %v", err)
-		}
+	// Test fundee's behavior. Fundee sees the channel pending, but funder
+	// sees it active and sends an HTLC.
+	ht.Run("pending on fundee side", func(t *testing.T) {
+		st := ht.Subtest(t)
+		testUpdateOnFundeePendingOpenChannels(st)
+	})
+}
 
-		_, minerHeight, err := miner.Client.GetBestBlock()
-		if err != nil {
-			return fmt.Errorf("unable to get current "+
-				"blockheight %v", err)
-		}
+// testUpdateOnFunderPendingOpenChannels checks that when the fundee sends an
+// `update_add_htlc` followed by `channel_ready` while the funder is still
+// processing the fundee's `channel_ready`, the HTLC will be cached and
+// eventually settled.
+func testUpdateOnFunderPendingOpenChannels(ht *lntest.HarnessTest) {
+	// Grab the channel participants.
+	alice, bob := ht.Alice, ht.Bob
 
-		if tempMinerHeight != minerHeight+delta {
-			return fmt.Errorf("expected new miner(%d) to be %d "+
-				"blocks ahead of original miner(%d)",
-				tempMinerHeight, delta, minerHeight)
-		}
+	// Restart Alice with the config so she won't process Bob's
+	// channel_ready msg immediately.
+	ht.RestartNodeWithExtraArgs(alice, []string{
+		"--dev.processchannelreadywait=10s",
+	})
 
-		return nil
-	}, defaultTimeout)
-	require.NoError(ht, err, "failed to assert block height delta")
+	// Make sure Alice and Bob are connected.
+	ht.EnsureConnected(alice, bob)
+
+	// Create a new channel that requires 1 confs before it's considered
+	// open.
+	params := lntest.OpenChannelParams{
+		Amt:     funding.MaxBtcFundingAmount,
+		PushAmt: funding.MaxBtcFundingAmount / 2,
+	}
+	pendingChan := ht.OpenChannelAssertPending(alice, bob, params)
+	chanPoint := &lnrpc.ChannelPoint{
+		FundingTxid: &lnrpc.ChannelPoint_FundingTxidBytes{
+			FundingTxidBytes: pendingChan.Txid,
+		},
+		OutputIndex: pendingChan.OutputIndex,
+	}
+
+	// Alice and Bob should both consider the channel pending open.
+	ht.AssertNumPendingOpenChannels(alice, 1)
+	ht.AssertNumPendingOpenChannels(bob, 1)
+
+	// Mine one block to confirm the funding transaction.
+	ht.MineBlocksAndAssertNumTxes(1, 1)
+
+	// TODO(yy): we've prematurely marked the channel as open before
+	// processing channel ready messages. We need to mark it as open after
+	// we've processed channel ready messages and change the check to,
+	// ht.AssertNumPendingOpenChannels(alice, 1)
+	ht.AssertNumPendingOpenChannels(alice, 0)
+
+	// Bob will consider the channel open as there's no wait time to send
+	// and receive Alice's channel_ready message.
+	ht.AssertNumPendingOpenChannels(bob, 0)
+
+	// Alice and Bob now have different view of the channel. For Bob,
+	// since the channel_ready messages are processed, he will have a
+	// working link to route HTLCs. For Alice, because she hasn't handled
+	// Bob's channel_ready, there's no active link yet.
+	//
+	// Alice now adds an invoice.
+	req := &lnrpc.Invoice{
+		RPreimage: ht.Random32Bytes(),
+		Value:     10_000,
+	}
+	invoice := alice.RPC.AddInvoice(req)
+
+	// Bob sends an `update_add_htlc`, which would result in this message
+	// being cached in Alice's `peer.Brontide` and the payment will stay
+	// in-flight instead of being failed by Alice.
+	bobReq := &routerrpc.SendPaymentRequest{
+		PaymentRequest: invoice.PaymentRequest,
+		TimeoutSeconds: 60,
+		FeeLimitMsat:   noFeeLimitMsat,
+	}
+	bobStream := bob.RPC.SendPayment(bobReq)
+	ht.AssertPaymentStatusFromStream(bobStream, lnrpc.Payment_IN_FLIGHT)
+
+	// Wait until Alice finishes processing Bob's channel_ready.
+	//
+	// NOTE: no effect before fixing the above TODO.
+	ht.AssertNumPendingOpenChannels(alice, 0)
+
+	// Once Alice sees the channel as active, she will process the cached
+	// premature `update_add_htlc` and settles the payment.
+	ht.AssertPaymentStatusFromStream(bobStream, lnrpc.Payment_SUCCEEDED)
+
+	// Close the channel.
+	ht.CloseChannel(alice, chanPoint)
+}
+
+// testUpdateOnFundeePendingOpenChannels checks that when the funder sends an
+// `update_add_htlc` followed by `channel_ready` while the fundee is still
+// processing the funder's `channel_ready`, the HTLC will be cached and
+// eventually settled.
+func testUpdateOnFundeePendingOpenChannels(ht *lntest.HarnessTest) {
+	// Grab the channel participants.
+	alice, bob := ht.Alice, ht.Bob
+
+	// Restart Bob with the config so he won't process Alice's
+	// channel_ready msg immediately.
+	ht.RestartNodeWithExtraArgs(bob, []string{
+		"--dev.processchannelreadywait=10s",
+	})
+
+	// Make sure Alice and Bob are connected.
+	ht.EnsureConnected(alice, bob)
+
+	// Create a new channel that requires 1 confs before it's considered
+	// open.
+	params := lntest.OpenChannelParams{
+		Amt: funding.MaxBtcFundingAmount,
+	}
+	pendingChan := ht.OpenChannelAssertPending(alice, bob, params)
+	chanPoint := &lnrpc.ChannelPoint{
+		FundingTxid: &lnrpc.ChannelPoint_FundingTxidBytes{
+			FundingTxidBytes: pendingChan.Txid,
+		},
+		OutputIndex: pendingChan.OutputIndex,
+	}
+
+	// Alice and Bob should both consider the channel pending open.
+	ht.AssertNumPendingOpenChannels(alice, 1)
+	ht.AssertNumPendingOpenChannels(bob, 1)
+
+	// Mine one block to confirm the funding transaction.
+	ht.MineBlocksAndAssertNumTxes(1, 1)
+
+	// Alice will consider the channel open as there's no wait time to send
+	// and receive Bob's channel_ready message.
+	ht.AssertNumPendingOpenChannels(alice, 0)
+
+	// TODO(yy): we've prematurely marked the channel as open before
+	// processing channel ready messages. We need to mark it as open after
+	// we've processed channel ready messages and change the check to,
+	// ht.AssertNumPendingOpenChannels(bob, 1)
+	ht.AssertNumPendingOpenChannels(bob, 0)
+
+	// Alice and Bob now have different view of the channel. For Alice,
+	// since the channel_ready messages are processed, she will have a
+	// working link to route HTLCs. For Bob, because he hasn't handled
+	// Alice's channel_ready, there's no active link yet.
+	//
+	// Bob now adds an invoice.
+	req := &lnrpc.Invoice{
+		RPreimage: ht.Random32Bytes(),
+		Value:     10_000,
+	}
+	bobInvoice := bob.RPC.AddInvoice(req)
+
+	// Alice sends an `update_add_htlc`, which would result in this message
+	// being cached in Bob's `peer.Brontide` and the payment will stay
+	// in-flight instead of being failed by Bob.
+	aliceReq := &routerrpc.SendPaymentRequest{
+		PaymentRequest: bobInvoice.PaymentRequest,
+		TimeoutSeconds: 60,
+		FeeLimitMsat:   noFeeLimitMsat,
+	}
+	aliceStream := alice.RPC.SendPayment(aliceReq)
+	ht.AssertPaymentStatusFromStream(aliceStream, lnrpc.Payment_IN_FLIGHT)
+
+	// Wait until Bob finishes processing Alice's channel_ready.
+	//
+	// NOTE: no effect before fixing the above TODO.
+	ht.AssertNumPendingOpenChannels(bob, 0)
+
+	// Once Bob sees the channel as active, he will process the cached
+	// premature `update_add_htlc` and settles the payment.
+	ht.AssertPaymentStatusFromStream(aliceStream, lnrpc.Payment_SUCCEEDED)
+
+	// Close the channel.
+	ht.CloseChannel(alice, chanPoint)
 }
 
 // verifyCloseUpdate is used to verify that a closed channel update is of the
@@ -593,4 +736,35 @@ func verifyCloseUpdate(chanUpdate *lnrpc.ChannelEventUpdate,
 	}
 
 	return nil
+}
+
+// testFundingExpiryBlocksOnPending checks that after an OpenChannel, and
+// before the funding transaction is confirmed, that the FundingExpiryBlocks
+// field of a PendingChannels decreases.
+func testFundingExpiryBlocksOnPending(ht *lntest.HarnessTest) {
+	alice, bob := ht.Alice, ht.Bob
+	param := lntest.OpenChannelParams{Amt: 100000}
+	update := ht.OpenChannelAssertPending(alice, bob, param)
+
+	// At this point, the channel's funding transaction will have been
+	// broadcast, but not confirmed. Alice and Bob's nodes should reflect
+	// this when queried via RPC. FundingExpiryBlock should decrease
+	// as blocks are mined, until the channel is confirmed. Empty blocks
+	// won't confirm the funding transaction, so let's mine a few empty
+	// blocks and verify the value of FundingExpiryBlock at each step.
+	const numEmptyBlocks = 3
+	for i := int32(0); i < numEmptyBlocks; i++ {
+		expectedVal := funding.MaxWaitNumBlocksFundingConf - i
+		pending := ht.AssertNumPendingOpenChannels(alice, 1)
+		require.Equal(ht, expectedVal, pending[0].FundingExpiryBlocks)
+		pending = ht.AssertNumPendingOpenChannels(bob, 1)
+		require.Equal(ht, expectedVal, pending[0].FundingExpiryBlocks)
+		ht.MineEmptyBlocks(1)
+	}
+
+	// Mine 1 block to confirm the funding transaction, and then close the
+	// channel.
+	ht.MineBlocksAndAssertNumTxes(1, 1)
+	chanPoint := lntest.ChanPointFromPendingUpdate(update)
+	ht.CloseChannel(alice, chanPoint)
 }

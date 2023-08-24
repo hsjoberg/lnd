@@ -49,6 +49,8 @@ type ClientDB struct {
 	nextIndex     uint32
 	indexes       map[keyIndexKey]uint32
 	legacyIndexes map[wtdb.TowerID]uint32
+
+	queues map[string]wtdb.Queue[*wtdb.BackupID]
 }
 
 // NewClientDB initializes a new mock ClientDB.
@@ -68,6 +70,7 @@ func NewClientDB() *ClientDB {
 		indexes:          make(map[keyIndexKey]uint32),
 		legacyIndexes:    make(map[wtdb.TowerID]uint32),
 		closableSessions: make(map[wtdb.SessionID]uint32),
+		queues:           make(map[string]wtdb.Queue[*wtdb.BackupID]),
 	}
 }
 
@@ -562,6 +565,52 @@ func (m *ClientDB) AckUpdate(id *wtdb.SessionID, seqNum,
 		session.TowerLastApplied = lastApplied
 
 		m.activeSessions[*id] = session
+		return nil
+	}
+
+	return wtdb.ErrCommittedUpdateNotFound
+}
+
+// GetDBQueue returns a BackupID Queue instance under the given name space.
+func (m *ClientDB) GetDBQueue(namespace []byte) wtdb.Queue[*wtdb.BackupID] {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if q, ok := m.queues[string(namespace)]; ok {
+		return q
+	}
+
+	q := NewQueueDB[*wtdb.BackupID]()
+	m.queues[string(namespace)] = q
+
+	return q
+}
+
+// DeleteCommittedUpdate deletes the committed update with the given sequence
+// number from the given session.
+func (m *ClientDB) DeleteCommittedUpdate(id *wtdb.SessionID,
+	seqNum uint16) error {
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Fail if session doesn't exist.
+	session, ok := m.activeSessions[*id]
+	if !ok {
+		return wtdb.ErrClientSessionNotFound
+	}
+
+	// Retrieve the committed update, failing if none is found.
+	updates := m.committedUpdates[session.ID]
+	for i, update := range updates {
+		if update.SeqNum != seqNum {
+			continue
+		}
+
+		// Remove the committed update from "disk".
+		updates = append(updates[:i], updates[i+1:]...)
+		m.committedUpdates[session.ID] = updates
+
 		return nil
 	}
 

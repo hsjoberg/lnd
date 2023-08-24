@@ -666,9 +666,19 @@ func (s *mockServer) Address() net.Addr {
 	return nil
 }
 
-func (s *mockServer) AddNewChannel(channel *channeldb.OpenChannel,
+func (s *mockServer) AddNewChannel(channel *lnpeer.NewChannel,
 	cancel <-chan struct{}) error {
 
+	return nil
+}
+
+func (s *mockServer) AddPendingChannel(_ lnwire.ChannelID,
+	cancel <-chan struct{}) error {
+
+	return nil
+}
+
+func (s *mockServer) RemovePendingChannel(_ lnwire.ChannelID) error {
 	return nil
 }
 
@@ -830,7 +840,7 @@ func (f *mockChannelLink) getDustClosure() dustClosure {
 func (f *mockChannelLink) HandleChannelUpdate(lnwire.Message) {
 }
 
-func (f *mockChannelLink) UpdateForwardingPolicy(_ ForwardingPolicy) {
+func (f *mockChannelLink) UpdateForwardingPolicy(_ models.ForwardingPolicy) {
 }
 func (f *mockChannelLink) CheckHtlcForward([32]byte, lnwire.MilliSatoshi,
 	lnwire.MilliSatoshi, uint32, uint32, uint32,
@@ -1102,7 +1112,7 @@ func (m *mockOnionErrorDecryptor) DecryptError(encryptedData []byte) (
 var _ htlcNotifier = (*mockHTLCNotifier)(nil)
 
 type mockHTLCNotifier struct {
-	htlcNotifier
+	htlcNotifier //nolint:unused
 }
 
 func (h *mockHTLCNotifier) NotifyForwardingEvent(key HtlcKey, info HtlcInfo,

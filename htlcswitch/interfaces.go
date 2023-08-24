@@ -7,7 +7,6 @@ import (
 	"github.com/lightningnetwork/lnd/invoices"
 	"github.com/lightningnetwork/lnd/lnpeer"
 	"github.com/lightningnetwork/lnd/lntypes"
-	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/record"
@@ -192,7 +191,7 @@ type ChannelLink interface {
 	// UpdateForwardingPolicy updates the forwarding policy for the target
 	// ChannelLink. Once updated, the link will use the new forwarding
 	// policy to govern if it an incoming HTLC should be forwarded or not.
-	UpdateForwardingPolicy(ForwardingPolicy)
+	UpdateForwardingPolicy(models.ForwardingPolicy)
 
 	// CheckHtlcForward should return a nil error if the passed HTLC details
 	// satisfy the current forwarding policy fo the target link. Otherwise,
@@ -253,13 +252,9 @@ type TowerClient interface {
 
 	// BackupState initiates a request to back up a particular revoked
 	// state. If the method returns nil, the backup is guaranteed to be
-	// successful unless the tower is unavailable and client is force quit,
-	// or the justice transaction would create dust outputs when trying to
-	// abide by the negotiated policy. If the channel we're trying to back
-	// up doesn't have a tweak for the remote party's output, then
-	// isTweakless should be true.
-	BackupState(*lnwire.ChannelID, *lnwallet.BreachRetribution,
-		channeldb.ChannelType) error
+	// successful unless the justice transaction would create dust outputs
+	// when trying to abide by the negotiated policy.
+	BackupState(chanID *lnwire.ChannelID, stateNum uint64) error
 }
 
 // InterceptableHtlcForwarder is the interface to set the interceptor

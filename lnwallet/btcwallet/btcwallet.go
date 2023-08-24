@@ -82,11 +82,6 @@ var (
 	// requested for the default imported account within the wallet.
 	errNoImportedAddrGen = errors.New("addresses cannot be generated for " +
 		"the default imported account")
-
-	// errIncompatibleAccountAddr is an error returned when the type of a
-	// new address being requested is incompatible with the account.
-	errIncompatibleAccountAddr = errors.New("incompatible address type " +
-		"for account")
 )
 
 // BtcWallet is an implementation of the lnwallet.WalletController interface
@@ -109,8 +104,7 @@ type BtcWallet struct {
 
 	blockCache *blockcache.BlockCache
 
-	musig2Sessions    map[input.MuSig2SessionID]*muSig2State
-	musig2SessionsMtx sync.Mutex
+	*input.MusigSessionManager
 }
 
 // A compile time check to ensure that BtcWallet implements the
@@ -172,16 +166,21 @@ func New(cfg Config, blockCache *blockcache.BlockCache) (*BtcWallet, error) {
 		}
 	}
 
-	return &BtcWallet{
-		cfg:            &cfg,
-		wallet:         wallet,
-		db:             wallet.Database(),
-		chain:          cfg.ChainSource,
-		netParams:      cfg.NetParams,
-		chainKeyScope:  chainKeyScope,
-		blockCache:     blockCache,
-		musig2Sessions: make(map[input.MuSig2SessionID]*muSig2State),
-	}, nil
+	finalWallet := &BtcWallet{
+		cfg:           &cfg,
+		wallet:        wallet,
+		db:            wallet.Database(),
+		chain:         cfg.ChainSource,
+		netParams:     cfg.NetParams,
+		chainKeyScope: chainKeyScope,
+		blockCache:    blockCache,
+	}
+
+	finalWallet.MusigSessionManager = input.NewMusigSessionManager(
+		finalWallet.fetchPrivKey,
+	)
+
+	return finalWallet, nil
 }
 
 // loaderCfg holds optional wallet loader configuration.
@@ -516,18 +515,14 @@ func (b *BtcWallet) keyScopeForAccountAddr(accountName string,
 		return addrKeyScope, defaultAccount, nil
 	}
 
-	// Otherwise, look up the account's key scope and check that it supports
-	// the requested address type.
-	keyScope, account, err := b.wallet.LookupAccount(accountName)
+	// Otherwise, look up the custom account and if it supports the given
+	// key scope.
+	accountNumber, err := b.wallet.AccountNumber(addrKeyScope, accountName)
 	if err != nil {
 		return waddrmgr.KeyScope{}, 0, err
 	}
 
-	if keyScope != addrKeyScope {
-		return waddrmgr.KeyScope{}, 0, errIncompatibleAccountAddr
-	}
-
-	return keyScope, account, nil
+	return addrKeyScope, accountNumber, nil
 }
 
 // NewAddress returns the next external or internal address for the wallet
@@ -636,17 +631,36 @@ func (b *BtcWallet) ListAccounts(name string,
 			break
 		}
 
-		// Otherwise, we'll retrieve the single account that's mapped by
-		// the given name.
-		scope, acctNum, err := b.wallet.LookupAccount(name)
-		if err != nil {
-			return nil, err
+		// In theory, there should be only one custom account for the
+		// given name. However, due to a lack of check, users could
+		// create custom accounts with various key scopes. This
+		// behaviour has been fixed but, we return all potential custom
+		// accounts with the given name.
+		for _, scope := range waddrmgr.DefaultKeyScopes {
+			a, err := b.wallet.AccountPropertiesByName(
+				scope, name,
+			)
+			switch {
+			case waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound):
+				continue
+
+			// In the specific case of a wallet initialized only by
+			// importing account xpubs (watch only wallets), it is
+			// possible that some keyscopes will be 'unknown' by the
+			// wallet (depending on the xpubs given to initialize
+			// it). If the keyscope is not found, just skip it.
+			case waddrmgr.IsError(err, waddrmgr.ErrScopeNotFound):
+				continue
+
+			case err != nil:
+				return nil, err
+			}
+
+			res = append(res, a)
 		}
-		account, err := b.wallet.AccountProperties(scope, acctNum)
-		if err != nil {
-			return nil, err
+		if len(res) == 0 {
+			return nil, newAccountNotFoundError(name)
 		}
-		res = append(res, account)
 
 	// Only the key scope filter was provided, so we'll return all accounts
 	// matching it.
@@ -688,6 +702,18 @@ func (b *BtcWallet) ListAccounts(name string,
 	}
 
 	return res, nil
+}
+
+// newAccountNotFoundError returns an error indicating that the manager didn't
+// find the specific account. This error is used to be compatible with the old
+// 'LookupAccount' behaviour previously used.
+func newAccountNotFoundError(name string) error {
+	str := fmt.Sprintf("account name '%s' not found", name)
+
+	return waddrmgr.ManagerError{
+		ErrorCode:   waddrmgr.ErrAccountNotFound,
+		Description: str,
+	}
 }
 
 // RequiredReserve returns the minimum amount of satoshis that should be
@@ -821,6 +847,10 @@ func (b *BtcWallet) ListAddresses(name string,
 // The address type can usually be inferred from the key's version, but may be
 // required for certain keys to map them into the proper scope.
 //
+// For custom accounts, we will first check if there is no account with the same
+// name (even with a different key scope). No custom account should have various
+// key scopes as it will result in non-deterministic behaviour.
+//
 // For BIP-0044 keys, an address type must be specified as we intend to not
 // support importing BIP-0044 keys into the wallet using the legacy
 // pay-to-pubkey-hash (P2PKH) scheme. A nested witness address type will force
@@ -837,6 +867,22 @@ func (b *BtcWallet) ImportAccount(name string, accountPubKey *hdkeychain.Extende
 	masterKeyFingerprint uint32, addrType *waddrmgr.AddressType,
 	dryRun bool) (*waddrmgr.AccountProperties, []btcutil.Address,
 	[]btcutil.Address, error) {
+
+	// For custom accounts, we first check if there is no existing account
+	// with the same name.
+	if name != lnwallet.DefaultAccountName &&
+		name != waddrmgr.ImportedAddrAccountName {
+
+		_, err := b.ListAccounts(name, nil)
+		if err == nil {
+			return nil, nil, nil,
+				fmt.Errorf("account '%s' already exists",
+					name)
+		}
+		if !waddrmgr.IsError(err, waddrmgr.ErrAccountNotFound) {
+			return nil, nil, nil, err
+		}
+	}
 
 	if !dryRun {
 		accountProps, err := b.wallet.ImportAccount(
@@ -1150,8 +1196,9 @@ func (b *BtcWallet) ListUnspentWitness(minConfs, maxConfs int32,
 // PublishTransaction performs cursory validation (dust checks, etc), then
 // finally broadcasts the passed transaction to the Bitcoin network. If
 // publishing the transaction fails, an error describing the reason is returned
-// (currently ErrDoubleSpend). If the transaction is already published to the
-// network (either in the mempool or chain) no error will be returned.
+// and mapped to the wallet's internal error types. If the transaction is
+// already published to the network (either in the mempool or chain) no error
+// will be returned.
 func (b *BtcWallet) PublishTransaction(tx *wire.MsgTx, label string) error {
 	if err := b.wallet.PublishTransaction(tx, label); err != nil {
 		// If we failed to publish the transaction, check whether we
@@ -1167,6 +1214,13 @@ func (b *BtcWallet) PublishTransaction(tx *wire.MsgTx, label string) error {
 		// replace transactions.
 		case *base.ErrReplacement:
 			return lnwallet.ErrDoubleSpend
+
+		// If the wallet reports that fee requirements for accepting the
+		// tx into mempool are not met, convert it to our internal
+		// ErrMempoolFee and return.
+		case *base.ErrMempoolFee:
+			return fmt.Errorf("%w: %v", lnwallet.ErrMempoolFee,
+				err.Error())
 
 		default:
 			return err

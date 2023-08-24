@@ -276,8 +276,12 @@ func createTestPeer(t *testing.T, notifier chainntnfs.ChainNotifier,
 		return nil, nil, err
 	}
 
-	aliceSigner := &mock.SingleSigner{Privkey: aliceKeyPriv}
-	bobSigner := &mock.SingleSigner{Privkey: bobKeyPriv}
+	aliceSigner := input.NewMockSigner(
+		[]*btcec.PrivateKey{aliceKeyPriv}, nil,
+	)
+	bobSigner := input.NewMockSigner(
+		[]*btcec.PrivateKey{bobKeyPriv}, nil,
+	)
 
 	alicePool := lnwallet.NewSigPool(1, aliceSigner)
 	channelAlice, err := lnwallet.NewLightningChannel(
@@ -408,7 +412,7 @@ func createTestPeer(t *testing.T, notifier chainntnfs.ChainNotifier,
 	alicePeer.remoteFeatures = lnwire.NewFeatureVector(nil, lnwire.Features)
 
 	chanID := lnwire.NewChanIDFromOutPoint(channelAlice.ChannelPoint())
-	alicePeer.activeChannels[chanID] = channelAlice
+	alicePeer.activeChannels.Store(chanID, channelAlice)
 
 	alicePeer.wg.Add(1)
 	go alicePeer.channelManager()

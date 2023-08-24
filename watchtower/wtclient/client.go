@@ -34,23 +34,22 @@ const (
 	// a read before breaking out of a blocking read.
 	DefaultReadTimeout = 15 * time.Second
 
-	// DefaultWriteTimeout specifies the default duration we will wait during
-	// a write before breaking out of a blocking write.
+	// DefaultWriteTimeout specifies the default duration we will wait
+	// during a write before breaking out of a blocking write.
 	DefaultWriteTimeout = 15 * time.Second
 
 	// DefaultStatInterval specifies the default interval between logging
 	// metrics about the client's operation.
 	DefaultStatInterval = time.Minute
 
-	// DefaultForceQuitDelay specifies the default duration after which the
-	// client should abandon any pending updates or session negotiations
-	// before terminating.
-	DefaultForceQuitDelay = 10 * time.Second
-
 	// DefaultSessionCloseRange is the range over which we will generate a
 	// random number of blocks to delay closing a session after its last
 	// channel has been closed.
 	DefaultSessionCloseRange = 288
+
+	// DefaultMaxTasksInMemQueue is the maximum number of items to be held
+	// in the in-memory queue.
+	DefaultMaxTasksInMemQueue = 2000
 )
 
 // genSessionFilter constructs a filter that can be used to select sessions only
@@ -134,13 +133,9 @@ type Client interface {
 
 	// BackupState initiates a request to back up a particular revoked
 	// state. If the method returns nil, the backup is guaranteed to be
-	// successful unless the client is force quit, or the justice
-	// transaction would create dust outputs when trying to abide by the
-	// negotiated policy. If the channel we're trying to back up doesn't
-	// have a tweak for the remote party's output, then isTweakless should
-	// be true.
-	BackupState(*lnwire.ChannelID, *lnwallet.BreachRetribution,
-		channeldb.ChannelType) error
+	// successful unless the justice transaction would create dust outputs
+	// when trying to abide by the negotiated policy.
+	BackupState(chanID *lnwire.ChannelID, stateNum uint64) error
 
 	// Start initializes the watchtower client, allowing it process requests
 	// to backup revoked channel states.
@@ -150,10 +145,6 @@ type Client interface {
 	// so, it will attempt to flush the pipeline and deliver any queued
 	// states to the tower before exiting.
 	Stop() error
-
-	// ForceQuit will forcibly shutdown the watchtower client. Calling this
-	// may lead to queued states being dropped.
-	ForceQuit()
 }
 
 // Config provides the TowerClient with access to the resources it requires to
@@ -177,6 +168,11 @@ type Config struct {
 
 	// ChainNotifier can be used to subscribe to block notifications.
 	ChainNotifier chainntnfs.ChainNotifier
+
+	// BuildBreachRetribution is a function closure that allows the client
+	// fetch the breach retribution info for a certain channel at a certain
+	// revoked commitment height.
+	BuildBreachRetribution BreachRetributionBuilder
 
 	// NewAddress generates a new on-chain sweep pkscript.
 	NewAddress func() ([]byte, error)
@@ -207,13 +203,6 @@ type Config struct {
 	// the tower must be watching to monitor for breaches.
 	ChainHash chainhash.Hash
 
-	// ForceQuitDelay is the duration after attempting to shutdown that the
-	// client will automatically abort any pending backups if an unclean
-	// shutdown is detected. If the value is less than or equal to zero, a
-	// call to Stop may block indefinitely. The client can always be
-	// ForceQuit externally irrespective of the chosen parameter.
-	ForceQuitDelay time.Duration
-
 	// ReadTimeout is the duration we will wait during a read before
 	// breaking out of a blocking read. If the value is less than or equal
 	// to zero, the default will be used instead.
@@ -238,7 +227,17 @@ type Config struct {
 	// number of blocks to delay closing a session after its last channel
 	// has been closed.
 	SessionCloseRange uint32
+
+	// MaxTasksInMemQueue is the maximum number of backup tasks that should
+	// be kept in-memory. Any more tasks will overflow to disk.
+	MaxTasksInMemQueue uint64
 }
+
+// BreachRetributionBuilder is a function that can be used to construct a
+// BreachRetribution from a channel ID and a commitment height.
+type BreachRetributionBuilder func(id lnwire.ChannelID,
+	commitHeight uint64) (*lnwallet.BreachRetribution,
+	channeldb.ChannelType, error)
 
 // newTowerMsg is an internal message we'll use within the TowerClient to signal
 // that a new tower can be considered.
@@ -279,21 +278,20 @@ type staleTowerMsg struct {
 type TowerClient struct {
 	started sync.Once
 	stopped sync.Once
-	forced  sync.Once
 
 	cfg *Config
 
 	log btclog.Logger
 
-	pipeline *taskPipeline
+	pipeline *DiskOverflowQueue[*wtdb.BackupID]
 
 	negotiator        SessionNegotiator
 	candidateTowers   TowerCandidateIterator
 	candidateSessions map[wtdb.SessionID]*ClientSession
-	activeSessions    sessionQueueSet
+	activeSessions    *sessionQueueSet
 
 	sessionQueue *sessionQueue
-	prevTask     *backupTask
+	prevTask     *wtdb.BackupID
 
 	closableSessionQueue *sessionCloseMinHeap
 
@@ -307,9 +305,8 @@ type TowerClient struct {
 	newTowers   chan *newTowerMsg
 	staleTowers chan *staleTowerMsg
 
-	wg        sync.WaitGroup
-	quit      chan struct{}
-	forceQuit chan struct{}
+	wg   sync.WaitGroup
+	quit chan struct{}
 }
 
 // Compile-time constraint to ensure *TowerClient implements the Client
@@ -334,10 +331,12 @@ func New(config *Config) (*TowerClient, error) {
 		cfg.WriteTimeout = DefaultWriteTimeout
 	}
 
-	prefix := "(legacy)"
-	if cfg.Policy.IsAnchorChannel() {
-		prefix = "(anchor)"
+	identifier, err := cfg.Policy.BlobType.Identifier()
+	if err != nil {
+		return nil, err
 	}
+	prefix := fmt.Sprintf("(%s)", identifier)
+
 	plog := build.NewPrefixLog(prefix, log)
 
 	// Load the sweep pkscripts that have been generated for all previously
@@ -347,19 +346,26 @@ func New(config *Config) (*TowerClient, error) {
 		return nil, err
 	}
 
+	queueDB := cfg.DB.GetDBQueue([]byte(identifier))
+	queue, err := NewDiskOverflowQueue[*wtdb.BackupID](
+		queueDB, cfg.MaxTasksInMemQueue, plog,
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	c := &TowerClient{
 		cfg:                  cfg,
 		log:                  plog,
-		pipeline:             newTaskPipeline(plog),
+		pipeline:             queue,
 		chanCommitHeights:    make(map[lnwire.ChannelID]uint64),
-		activeSessions:       make(sessionQueueSet),
+		activeSessions:       newSessionQueueSet(),
 		summaries:            chanSummaries,
 		closableSessionQueue: newSessionCloseMinHeap(),
 		statTicker:           time.NewTicker(DefaultStatInterval),
 		stats:                new(ClientStats),
 		newTowers:            make(chan *newTowerMsg),
 		staleTowers:          make(chan *staleTowerMsg),
-		forceQuit:            make(chan struct{}),
 		quit:                 make(chan struct{}),
 	}
 
@@ -377,6 +383,9 @@ func New(config *Config) (*TowerClient, error) {
 		if policy != c.cfg.Policy {
 			return
 		}
+
+		c.backupMu.Lock()
+		defer c.backupMu.Unlock()
 
 		// Take the highest commit height found in the session's acked
 		// updates.
@@ -558,8 +567,11 @@ func (c *TowerClient) Start() error {
 		// committed but unacked state updates. This ensures that these
 		// sessions will be able to flush the committed updates after a
 		// restart.
+		fetchCommittedUpdates := c.cfg.DB.FetchSessionCommittedUpdates
 		for _, session := range c.candidateSessions {
-			committedUpdates, err := c.cfg.DB.FetchSessionCommittedUpdates(&session.ID)
+			committedUpdates, err := fetchCommittedUpdates(
+				&session.ID,
+			)
 			if err != nil {
 				returnErr = err
 				return
@@ -645,7 +657,11 @@ func (c *TowerClient) Start() error {
 
 		// Start the task pipeline to which new backup tasks will be
 		// submitted from active links.
-		c.pipeline.Start()
+		err = c.pipeline.Start()
+		if err != nil {
+			returnErr = err
+			return
+		}
 
 		c.wg.Add(1)
 		go c.backupDispatcher()
@@ -657,94 +673,54 @@ func (c *TowerClient) Start() error {
 
 // Stop idempotently initiates a graceful shutdown of the watchtower client.
 func (c *TowerClient) Stop() error {
+	var returnErr error
 	c.stopped.Do(func() {
 		c.log.Debugf("Stopping watchtower client")
 
-		// 1. To ensure we don't hang forever on shutdown due to
-		// unintended failures, we'll delay a call to force quit the
-		// pipeline if a ForceQuitDelay is specified. This will have no
-		// effect if the pipeline shuts down cleanly before the delay
-		// fires.
-		//
-		// For full safety, this can be set to 0 and wait out
-		// indefinitely.  However for mobile clients which may have a
-		// limited amount of time to exit before the background process
-		// is killed, this offers a way to ensure the process
-		// terminates.
-		if c.cfg.ForceQuitDelay > 0 {
-			time.AfterFunc(c.cfg.ForceQuitDelay, c.ForceQuit)
+		// 1. Stop the session negotiator.
+		err := c.negotiator.Stop()
+		if err != nil {
+			returnErr = err
 		}
 
-		// 2. Shutdown the backup queue, which will prevent any further
-		// updates from being accepted. In practice, the links should be
-		// shutdown before the client has been stopped, so all updates
-		// would have been added prior.
-		c.pipeline.Stop()
-
-		// 3. Once the backup queue has shutdown, wait for the main
-		// dispatcher to exit. The backup queue will signal it's
-		// completion to the dispatcher, which releases the wait group
-		// after all tasks have been assigned to session queues.
+		// 2. Stop the backup dispatcher and any other goroutines.
 		close(c.quit)
 		c.wg.Wait()
 
-		// 4. Since all valid tasks have been assigned to session
-		// queues, we no longer need to negotiate sessions.
-		c.negotiator.Stop()
+		// 3. If there was a left over 'prevTask' from the backup
+		// dispatcher, replay that onto the pipeline.
+		if c.prevTask != nil {
+			err = c.pipeline.QueueBackupID(c.prevTask)
+			if err != nil {
+				returnErr = err
+			}
+		}
 
-		c.log.Debugf("Waiting for active session queues to finish "+
-			"draining, stats: %s", c.stats)
-
-		// 5. Shutdown all active session queues in parallel. These will
-		// exit once all updates have been acked by the watchtower.
+		// 4. Shutdown all active session queues in parallel. These will
+		// exit once all unhandled updates have been replayed to the
+		// task pipeline.
 		c.activeSessions.ApplyAndWait(func(s *sessionQueue) func() {
-			return s.Stop
+			return func() {
+				err := s.Stop(false)
+				if err != nil {
+					c.log.Errorf("could not stop session "+
+						"queue: %s: %v", s.ID(), err)
+
+					returnErr = err
+				}
+			}
 		})
 
-		// Skip log if force quitting.
-		select {
-		case <-c.forceQuit:
-			return
-		default:
+		// 5. Shutdown the backup queue, which will prevent any further
+		// updates from being accepted.
+		if err = c.pipeline.Stop(); err != nil {
+			returnErr = err
 		}
 
 		c.log.Debugf("Client successfully stopped, stats: %s", c.stats)
 	})
-	return nil
-}
 
-// ForceQuit idempotently initiates an unclean shutdown of the watchtower
-// client. This should only be executed if Stop is unable to exit cleanly.
-func (c *TowerClient) ForceQuit() {
-	c.forced.Do(func() {
-		c.log.Infof("Force quitting watchtower client")
-
-		// 1. Shutdown the backup queue, which will prevent any further
-		// updates from being accepted. In practice, the links should be
-		// shutdown before the client has been stopped, so all updates
-		// would have been added prior.
-		c.pipeline.ForceQuit()
-
-		// 2. Once the backup queue has shutdown, wait for the main
-		// dispatcher to exit. The backup queue will signal it's
-		// completion to the dispatcher, which releases the wait group
-		// after all tasks have been assigned to session queues.
-		close(c.forceQuit)
-		c.wg.Wait()
-
-		// 3. Since all valid tasks have been assigned to session
-		// queues, we no longer need to negotiate sessions.
-		c.negotiator.Stop()
-
-		// 4. Force quit all active session queues in parallel. These
-		// will exit once all updates have been acked by the watchtower.
-		c.activeSessions.ApplyAndWait(func(s *sessionQueue) func() {
-			return s.ForceQuit
-		})
-
-		c.log.Infof("Watchtower client unclean shutdown complete, "+
-			"stats: %s", c.stats)
-	})
+	return returnErr
 }
 
 // RegisterChannel persistently initializes any channel-dependent parameters
@@ -785,43 +761,43 @@ func (c *TowerClient) RegisterChannel(chanID lnwire.ChannelID) error {
 
 // BackupState initiates a request to back up a particular revoked state. If the
 // method returns nil, the backup is guaranteed to be successful unless the:
-//   - client is force quit,
 //   - justice transaction would create dust outputs when trying to abide by the
 //     negotiated policy, or
-//   - breached outputs contain too little value to sweep at the target sweep fee
-//     rate.
+//   - breached outputs contain too little value to sweep at the target sweep
+//     fee rate.
 func (c *TowerClient) BackupState(chanID *lnwire.ChannelID,
-	breachInfo *lnwallet.BreachRetribution,
-	chanType channeldb.ChannelType) error {
+	stateNum uint64) error {
 
-	// Retrieve the cached sweep pkscript used for this channel.
+	// Make sure that this channel is registered with the tower client.
 	c.backupMu.Lock()
-	summary, ok := c.summaries[*chanID]
-	if !ok {
+	if _, ok := c.summaries[*chanID]; !ok {
 		c.backupMu.Unlock()
+
 		return ErrUnregisteredChannel
 	}
 
 	// Ignore backups that have already been presented to the client.
 	height, ok := c.chanCommitHeights[*chanID]
-	if ok && breachInfo.RevokedStateNum <= height {
+	if ok && stateNum <= height {
 		c.backupMu.Unlock()
-		c.log.Debugf("Ignoring duplicate backup for chanid=%v at height=%d",
-			chanID, breachInfo.RevokedStateNum)
+		c.log.Debugf("Ignoring duplicate backup for chanid=%v at "+
+			"height=%d", chanID, stateNum)
+
 		return nil
 	}
 
 	// This backup has a higher commit height than any known backup for this
 	// channel. We'll update our tip so that we won't accept it again if the
 	// link flaps.
-	c.chanCommitHeights[*chanID] = breachInfo.RevokedStateNum
+	c.chanCommitHeights[*chanID] = stateNum
 	c.backupMu.Unlock()
 
-	task := newBackupTask(
-		chanID, breachInfo, summary.SweepPkScript, chanType,
-	)
+	id := &wtdb.BackupID{
+		ChanID:       *chanID,
+		CommitHeight: stateNum,
+	}
 
-	return c.pipeline.QueueBackupTask(task)
+	return c.pipeline.QueueBackupID(id)
 }
 
 // nextSessionQueue attempts to fetch an active session from our set of
@@ -906,9 +882,6 @@ func (c *TowerClient) handleChannelCloses(chanSub subscribe.Subscription) {
 					"event for channel(%s): %v", chanID,
 					err)
 			}
-
-		case <-c.forceQuit:
-			return
 
 		case <-c.quit:
 			return
@@ -1036,9 +1009,6 @@ func (c *TowerClient) handleClosableSessions(
 					continue
 				}
 			}
-
-		case <-c.forceQuit:
-			return
 
 		case <-c.quit:
 			return
@@ -1198,8 +1168,7 @@ func (c *TowerClient) deleteSessionFromTower(sess *wtdb.ClientSession) error {
 
 // backupDispatcher processes events coming from the taskPipeline and is
 // responsible for detecting when the client needs to renegotiate a session to
-// fulfill continuing demand. The event loop exits after all tasks have been
-// received from the upstream taskPipeline, or the taskPipeline is force quit.
+// fulfill continuing demand. The event loop exits if the TowerClient is quit.
 //
 // NOTE: This method MUST be run as a goroutine.
 func (c *TowerClient) backupDispatcher() {
@@ -1249,7 +1218,7 @@ func (c *TowerClient) backupDispatcher() {
 			case msg := <-c.staleTowers:
 				msg.errChan <- c.handleStaleTower(msg)
 
-			case <-c.forceQuit:
+			case <-c.quit:
 				return
 			}
 
@@ -1308,14 +1277,14 @@ func (c *TowerClient) backupDispatcher() {
 
 			// Process each backup task serially from the queue of
 			// revoked states.
-			case task, ok := <-c.pipeline.NewBackupTasks():
+			case task, ok := <-c.pipeline.NextBackupID():
 				// All backups in the pipeline have been
 				// processed, it is now safe to exit.
 				if !ok {
 					return
 				}
 
-				c.log.Debugf("Processing %v", task.id)
+				c.log.Debugf("Processing %v", task)
 
 				c.stats.taskReceived()
 				c.processTask(task)
@@ -1333,6 +1302,9 @@ func (c *TowerClient) backupDispatcher() {
 			// of its corresponding candidate sessions as inactive.
 			case msg := <-c.staleTowers:
 				msg.errChan <- c.handleStaleTower(msg)
+
+			case <-c.quit:
+				return
 			}
 		}
 	}
@@ -1345,8 +1317,22 @@ func (c *TowerClient) backupDispatcher() {
 // sessionQueue hasn't been exhausted before proceeding to the next task. Tasks
 // that are rejected because the active sessionQueue is full will be cached as
 // the prevTask, and should be reprocessed after obtaining a new sessionQueue.
-func (c *TowerClient) processTask(task *backupTask) {
-	status, accepted := c.sessionQueue.AcceptTask(task)
+func (c *TowerClient) processTask(task *wtdb.BackupID) {
+	c.backupMu.Lock()
+	summary, ok := c.summaries[task.ChanID]
+	if !ok {
+		c.backupMu.Unlock()
+
+		log.Infof("not processing task for unregistered channel: %s",
+			task.ChanID)
+
+		return
+	}
+	c.backupMu.Unlock()
+
+	backupTask := newBackupTask(*task, summary.SweepPkScript)
+
+	status, accepted := c.sessionQueue.AcceptTask(backupTask)
 	if accepted {
 		c.taskAccepted(task, status)
 	} else {
@@ -1359,9 +1345,11 @@ func (c *TowerClient) processTask(task *backupTask) {
 // prevTask is always removed as a result of this call. The client's
 // sessionQueue will be removed if accepting the task left the sessionQueue in
 // an exhausted state.
-func (c *TowerClient) taskAccepted(task *backupTask, newStatus reserveStatus) {
-	c.log.Infof("Queued %v successfully for session %v",
-		task.id, c.sessionQueue.ID())
+func (c *TowerClient) taskAccepted(task *wtdb.BackupID,
+	newStatus sessionQueueStatus) {
+
+	c.log.Infof("Queued %v successfully for session %v", task,
+		c.sessionQueue.ID())
 
 	c.stats.taskAccepted()
 
@@ -1372,11 +1360,11 @@ func (c *TowerClient) taskAccepted(task *backupTask, newStatus reserveStatus) {
 	switch newStatus {
 
 	// The sessionQueue still has capacity after accepting this task.
-	case reserveAvailable:
+	case sessionQueueAvailable:
 
 	// The sessionQueue is full after accepting this task, so we will need
 	// to request a new one before proceeding.
-	case reserveExhausted:
+	case sessionQueueExhausted:
 		c.stats.sessionExhausted()
 
 		c.log.Debugf("Session %s exhausted", c.sessionQueue.ID())
@@ -1392,24 +1380,27 @@ func (c *TowerClient) taskAccepted(task *backupTask, newStatus reserveStatus) {
 // the state the was in *before* the task was rejected. The client's prevTask
 // will cache the task if the sessionQueue was exhausted beforehand, and nil
 // the sessionQueue to find a new session. If the sessionQueue was not
-// exhausted, the client marks the task as ineligible, as this implies we
-// couldn't construct a valid justice transaction given the session's policy.
-func (c *TowerClient) taskRejected(task *backupTask, curStatus reserveStatus) {
+// exhausted and not shutting down, the client marks the task as ineligible, as
+// this implies we couldn't construct a valid justice transaction given the
+// session's policy.
+func (c *TowerClient) taskRejected(task *wtdb.BackupID,
+	curStatus sessionQueueStatus) {
+
 	switch curStatus {
 
 	// The sessionQueue has available capacity but the task was rejected,
 	// this indicates that the task was ineligible for backup.
-	case reserveAvailable:
+	case sessionQueueAvailable:
 		c.stats.taskIneligible()
 
-		c.log.Infof("Ignoring ineligible %v", task.id)
+		c.log.Infof("Ignoring ineligible %v", task)
 
 		err := c.cfg.DB.MarkBackupIneligible(
-			task.id.ChanID, task.id.CommitHeight,
+			task.ChanID, task.CommitHeight,
 		)
 		if err != nil {
 			c.log.Errorf("Unable to mark %v ineligible: %v",
-				task.id, err)
+				task, err)
 
 			// It is safe to not handle this error, even if we could
 			// not persist the result. At worst, this task may be
@@ -1425,11 +1416,23 @@ func (c *TowerClient) taskRejected(task *backupTask, curStatus reserveStatus) {
 
 	// The sessionQueue rejected the task because it is full, we will stash
 	// this task and try to add it to the next available sessionQueue.
-	case reserveExhausted:
+	case sessionQueueExhausted:
 		c.stats.sessionExhausted()
 
 		c.log.Debugf("Session %v exhausted, %v queued for next session",
-			c.sessionQueue.ID(), task.id)
+			c.sessionQueue.ID(), task)
+
+		// Cache the task that we pulled off, so that we can process it
+		// once a new session queue is available.
+		c.sessionQueue = nil
+		c.prevTask = task
+
+	// The sessionQueue rejected the task because it is shutting down. We
+	// will stash this task and try to add it to the next available
+	// sessionQueue.
+	case sessionQueueShuttingDown:
+		c.log.Debugf("Session %v is shutting down, %v queued for "+
+			"next session", c.sessionQueue.ID(), task)
 
 		// Cache the task that we pulled off, so that we can process it
 		// once a new session queue is available.
@@ -1485,7 +1488,9 @@ func (c *TowerClient) readMessage(peer wtserver.Peer) (wtwire.Message, error) {
 }
 
 // sendMessage sends a watchtower wire message to the target peer.
-func (c *TowerClient) sendMessage(peer wtserver.Peer, msg wtwire.Message) error {
+func (c *TowerClient) sendMessage(peer wtserver.Peer,
+	msg wtwire.Message) error {
+
 	// Encode the next wire message into the buffer.
 	// TODO(conner): use buffer pool
 	var b bytes.Buffer
@@ -1521,16 +1526,18 @@ func (c *TowerClient) newSessionQueue(s *ClientSession,
 	updates []wtdb.CommittedUpdate) *sessionQueue {
 
 	return newSessionQueue(&sessionQueueConfig{
-		ClientSession: s,
-		ChainHash:     c.cfg.ChainHash,
-		Dial:          c.dial,
-		ReadMessage:   c.readMessage,
-		SendMessage:   c.sendMessage,
-		Signer:        c.cfg.Signer,
-		DB:            c.cfg.DB,
-		MinBackoff:    c.cfg.MinBackoff,
-		MaxBackoff:    c.cfg.MaxBackoff,
-		Log:           c.log,
+		ClientSession:          s,
+		ChainHash:              c.cfg.ChainHash,
+		Dial:                   c.dial,
+		ReadMessage:            c.readMessage,
+		SendMessage:            c.sendMessage,
+		Signer:                 c.cfg.Signer,
+		DB:                     c.cfg.DB,
+		MinBackoff:             c.cfg.MinBackoff,
+		MaxBackoff:             c.cfg.MaxBackoff,
+		Log:                    c.log,
+		BuildBreachRetribution: c.cfg.BuildBreachRetribution,
+		TaskPipeline:           c.pipeline,
 	}, updates)
 }
 
@@ -1540,7 +1547,7 @@ func (c *TowerClient) newSessionQueue(s *ClientSession,
 func (c *TowerClient) getOrInitActiveQueue(s *ClientSession,
 	updates []wtdb.CommittedUpdate) *sessionQueue {
 
-	if sq, ok := c.activeSessions[s.ID]; ok {
+	if sq, ok := c.activeSessions.Get(s.ID); ok {
 		return sq
 	}
 
@@ -1559,12 +1566,10 @@ func (c *TowerClient) initActiveQueue(s *ClientSession,
 	sq := c.newSessionQueue(s, updates)
 
 	// Add the session queue as an active session so that we remember to
-	// stop it on shutdown.
-	c.activeSessions.Add(sq)
-
-	// Start the queue so that it can be active in processing newly assigned
-	// tasks or to upload previously committed updates.
-	sq.Start()
+	// stop it on shutdown. This method will also start the queue so that it
+	// can be active in processing newly assigned tasks or to upload
+	// previously committed updates.
+	c.activeSessions.AddAndStart(sq)
 
 	return sq
 }
@@ -1599,16 +1604,12 @@ func (c *TowerClient) AddTower(addr *lnwire.NetAddress) error {
 	}:
 	case <-c.pipeline.quit:
 		return ErrClientExiting
-	case <-c.pipeline.forceQuit:
-		return ErrClientExiting
 	}
 
 	select {
 	case err := <-errChan:
 		return err
 	case <-c.pipeline.quit:
-		return ErrClientExiting
-	case <-c.pipeline.forceQuit:
 		return ErrClientExiting
 	}
 }
@@ -1653,7 +1654,9 @@ func (c *TowerClient) handleNewTower(msg *newTowerMsg) error {
 // negotiations and from being used for any subsequent backups until it's added
 // again. If an address is provided, then this call only serves as a way of
 // removing the address from the watchtower instead.
-func (c *TowerClient) RemoveTower(pubKey *btcec.PublicKey, addr net.Addr) error {
+func (c *TowerClient) RemoveTower(pubKey *btcec.PublicKey,
+	addr net.Addr) error {
+
 	errChan := make(chan error, 1)
 
 	select {
@@ -1664,8 +1667,6 @@ func (c *TowerClient) RemoveTower(pubKey *btcec.PublicKey, addr net.Addr) error 
 	}:
 	case <-c.pipeline.quit:
 		return ErrClientExiting
-	case <-c.pipeline.forceQuit:
-		return ErrClientExiting
 	}
 
 	select {
@@ -1673,15 +1674,13 @@ func (c *TowerClient) RemoveTower(pubKey *btcec.PublicKey, addr net.Addr) error 
 		return err
 	case <-c.pipeline.quit:
 		return ErrClientExiting
-	case <-c.pipeline.forceQuit:
-		return ErrClientExiting
 	}
 }
 
-// handleNewTower handles a request for an existing tower to be removed. If none
-// of the tower's sessions have pending updates, then they will become inactive
-// and removed as candidates. If the active session queue corresponds to any of
-// these sessions, a new one will be negotiated.
+// handleStaleTower handles a request for an existing tower to be removed. If
+// none of the tower's sessions have pending updates, then they will become
+// inactive and removed as candidates. If the active session queue corresponds
+// to any of these sessions, a new one will be negotiated.
 func (c *TowerClient) handleStaleTower(msg *staleTowerMsg) error {
 	// We'll load the tower before potentially removing it in order to
 	// retrieve its ID within the database.
@@ -1690,37 +1689,20 @@ func (c *TowerClient) handleStaleTower(msg *staleTowerMsg) error {
 		return err
 	}
 
-	// We'll first update our in-memory state followed by our persisted
-	// state, with the stale tower. The removal of the tower address from
-	// the in-memory state will fail if the address is currently being used
-	// for a session negotiation.
-	err = c.candidateTowers.RemoveCandidate(dbTower.ID, msg.addr)
+	// If an address was provided, then we're only meant to remove the
+	// address from the tower.
+	if msg.addr != nil {
+		return c.removeTowerAddr(dbTower, msg.addr)
+	}
+
+	// Otherwise, the tower should no longer be used for future session
+	// negotiations and backups. First, we'll update our in-memory state
+	// with the stale tower.
+	err = c.candidateTowers.RemoveCandidate(dbTower.ID, nil)
 	if err != nil {
 		return err
 	}
 
-	if err := c.cfg.DB.RemoveTower(msg.pubKey, msg.addr); err != nil {
-		// If the persisted state update fails, re-add the address to
-		// our in-memory state.
-		tower, newTowerErr := NewTowerFromDBTower(dbTower)
-		if newTowerErr != nil {
-			log.Errorf("could not create new in-memory tower: %v",
-				newTowerErr)
-		} else {
-			c.candidateTowers.AddCandidate(tower)
-		}
-
-		return err
-	}
-
-	// If an address was provided, then we're only meant to remove the
-	// address from the tower, so there's nothing left for us to do.
-	if msg.addr != nil {
-		return nil
-	}
-
-	// Otherwise, the tower should no longer be used for future session
-	// negotiations and backups.
 	pubKey := msg.pubKey.SerializeCompressed()
 	sessions, err := c.cfg.DB.ListClientSessions(&dbTower.ID)
 	if err != nil {
@@ -1729,15 +1711,58 @@ func (c *TowerClient) handleStaleTower(msg *staleTowerMsg) error {
 	}
 	for sessionID := range sessions {
 		delete(c.candidateSessions, sessionID)
+
+		// Shutdown the session so that any pending updates are
+		// replayed back onto the main task pipeline.
+		err = c.activeSessions.StopAndRemove(sessionID)
+		if err != nil {
+			c.log.Errorf("could not stop session %s: %w", sessionID,
+				err)
+		}
 	}
 
 	// If our active session queue corresponds to the stale tower, we'll
 	// proceed to negotiate a new one.
 	if c.sessionQueue != nil {
-		activeTower := c.sessionQueue.tower.IdentityKey.SerializeCompressed()
-		if bytes.Equal(pubKey, activeTower) {
+		towerKey := c.sessionQueue.tower.IdentityKey
+
+		if bytes.Equal(pubKey, towerKey.SerializeCompressed()) {
 			c.sessionQueue = nil
 		}
+	}
+
+	// Finally, we will update our persisted state with the stale tower.
+	return c.cfg.DB.RemoveTower(msg.pubKey, nil)
+}
+
+// removeTowerAddr removes the given address from the tower.
+func (c *TowerClient) removeTowerAddr(tower *wtdb.Tower, addr net.Addr) error {
+	if addr == nil {
+		return fmt.Errorf("an address must be provided")
+	}
+
+	// We'll first update our in-memory state followed by our persisted
+	// state with the stale tower. The removal of the tower address from
+	// the in-memory state will fail if the address is currently being used
+	// for a session negotiation.
+	err := c.candidateTowers.RemoveCandidate(tower.ID, addr)
+	if err != nil {
+		return err
+	}
+
+	err = c.cfg.DB.RemoveTower(tower.IdentityKey, addr)
+	if err != nil {
+		// If the persisted state update fails, re-add the address to
+		// our in-memory state.
+		tower, newTowerErr := NewTowerFromDBTower(tower)
+		if newTowerErr != nil {
+			log.Errorf("could not create new in-memory tower: %v",
+				newTowerErr)
+		} else {
+			c.candidateTowers.AddCandidate(tower)
+		}
+
+		return err
 	}
 
 	return nil

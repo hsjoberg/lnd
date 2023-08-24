@@ -203,11 +203,14 @@ type Config struct {
 	// notification for when it reconnects.
 	NotifyWhenOffline func(peerPubKey [33]byte) <-chan struct{}
 
-	// SelfNodeAnnouncement is a function that fetches our own current node
-	// announcement, for use when determining whether we should update our
-	// peers about our presence on the network. If the refresh is true, a
-	// new and updated announcement will be returned.
-	SelfNodeAnnouncement func(refresh bool) (lnwire.NodeAnnouncement, error)
+	// FetchSelfAnnouncement retrieves our current node announcement, for
+	// use when determining whether we should update our peers about our
+	// presence in the network.
+	FetchSelfAnnouncement func() lnwire.NodeAnnouncement
+
+	// UpdateSelfAnnouncement produces a new announcement for our node with
+	// an updated timestamp which can be broadcast to our peers.
+	UpdateSelfAnnouncement func() (lnwire.NodeAnnouncement, error)
 
 	// ProofMatureDelta the number of confirmations which is needed before
 	// exchange the channel announcement proofs.
@@ -447,7 +450,7 @@ type AuthenticatedGossiper struct {
 	// goroutine per channel ID. This is done to ensure that when
 	// the gossiper is handling an announcement, the db state stays
 	// consistent between when the DB is first read until it's written.
-	channelMtx *multimutex.Mutex
+	channelMtx *multimutex.Mutex[uint64]
 
 	recentRejects *lru.Cache[rejectCacheKey, *cachedReject]
 
@@ -493,7 +496,7 @@ func New(cfg Config, selfKeyDesc *keychain.KeyDescriptor) *AuthenticatedGossiper
 		prematureChannelUpdates: lru.NewCache[uint64, *cachedNetworkMsg]( //nolint: lll
 			maxPrematureUpdates,
 		),
-		channelMtx: multimutex.NewMutex(),
+		channelMtx: multimutex.NewMutex[uint64](),
 		recentRejects: lru.NewCache[rejectCacheKey, *cachedReject](
 			maxRejectedUpdates,
 		),
@@ -1660,12 +1663,7 @@ func (d *AuthenticatedGossiper) retransmitStaleAnns(now time.Time) error {
 	}
 
 	// We'll also check that our NodeAnnouncement is not too old.
-	currentNodeAnn, err := d.cfg.SelfNodeAnnouncement(false)
-	if err != nil {
-		return fmt.Errorf("unable to get current node announment: %v",
-			err)
-	}
-
+	currentNodeAnn := d.cfg.FetchSelfAnnouncement()
 	timestamp := time.Unix(int64(currentNodeAnn.Timestamp), 0)
 	timeElapsed := now.Sub(timestamp)
 
@@ -1673,7 +1671,7 @@ func (d *AuthenticatedGossiper) retransmitStaleAnns(now time.Time) error {
 	// node announcement, refresh it and resend it.
 	nodeAnnStr := ""
 	if timeElapsed >= d.cfg.RebroadcastInterval {
-		newNodeAnn, err := d.cfg.SelfNodeAnnouncement(true)
+		newNodeAnn, err := d.cfg.UpdateSelfAnnouncement()
 		if err != nil {
 			return fmt.Errorf("unable to get refreshed node "+
 				"announcement: %v", err)
@@ -2201,25 +2199,25 @@ func (d *AuthenticatedGossiper) updateChannel(info *channeldb.ChannelEdgeInfo,
 			BitcoinKey2:     info.BitcoinKey2Bytes,
 			ExtraOpaqueData: edge.ExtraOpaqueData,
 		}
-		chanAnn.NodeSig1, err = lnwire.NewSigFromRawSignature(
+		chanAnn.NodeSig1, err = lnwire.NewSigFromECDSARawSignature(
 			info.AuthProof.NodeSig1Bytes,
 		)
 		if err != nil {
 			return nil, nil, err
 		}
-		chanAnn.NodeSig2, err = lnwire.NewSigFromRawSignature(
+		chanAnn.NodeSig2, err = lnwire.NewSigFromECDSARawSignature(
 			info.AuthProof.NodeSig2Bytes,
 		)
 		if err != nil {
 			return nil, nil, err
 		}
-		chanAnn.BitcoinSig1, err = lnwire.NewSigFromRawSignature(
+		chanAnn.BitcoinSig1, err = lnwire.NewSigFromECDSARawSignature(
 			info.AuthProof.BitcoinSig1Bytes,
 		)
 		if err != nil {
 			return nil, nil, err
 		}
-		chanAnn.BitcoinSig2, err = lnwire.NewSigFromRawSignature(
+		chanAnn.BitcoinSig2, err = lnwire.NewSigFromECDSARawSignature(
 			info.AuthProof.BitcoinSig2Bytes,
 		)
 		if err != nil {

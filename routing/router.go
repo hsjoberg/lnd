@@ -442,7 +442,7 @@ type ChannelRouter struct {
 	// channelEdgeMtx is a mutex we use to make sure we process only one
 	// ChannelEdgePolicy at a time for a given channelID, to ensure
 	// consistency between the various database accesses.
-	channelEdgeMtx *multimutex.Mutex
+	channelEdgeMtx *multimutex.Mutex[uint64]
 
 	// statTicker is a resumable ticker that logs the router's progress as
 	// it discovers channels or receives updates.
@@ -480,7 +480,7 @@ func New(cfg Config) (*ChannelRouter, error) {
 		networkUpdates:    make(chan *routingMsg),
 		topologyClients:   &lnutils.SyncMap[uint64, *topologyClient]{},
 		ntfnClientUpdates: make(chan *topologyClientUpdate),
-		channelEdgeMtx:    multimutex.NewMutex(),
+		channelEdgeMtx:    multimutex.NewMutex[uint64](),
 		selfNode:          selfNode,
 		statTicker:        ticker.New(defaultStatInterval),
 		stats:             new(routerStats),
@@ -1416,6 +1416,70 @@ func (r *ChannelRouter) addZombieEdge(chanID uint64) error {
 	return nil
 }
 
+// makeFundingScript is used to make the funding script for both segwit v0 and
+// segwit v1 (taproot) channels.
+//
+// TODO(roasbeef: export and use elsewhere?
+func makeFundingScript(bitcoinKey1, bitcoinKey2 []byte,
+	chanFeatures []byte) ([]byte, error) {
+
+	legacyFundingScript := func() ([]byte, error) {
+		witnessScript, err := input.GenMultiSigScript(
+			bitcoinKey1, bitcoinKey2,
+		)
+		if err != nil {
+			return nil, err
+		}
+		pkScript, err := input.WitnessScriptHash(witnessScript)
+		if err != nil {
+			return nil, err
+		}
+
+		return pkScript, nil
+	}
+
+	if len(chanFeatures) == 0 {
+		return legacyFundingScript()
+	}
+
+	// In order to make the correct funding script, we'll need to parse the
+	// chanFeatures bytes into a feature vector we can interact with.
+	rawFeatures := lnwire.NewRawFeatureVector()
+	err := rawFeatures.Decode(bytes.NewReader(chanFeatures))
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse chan feature "+
+			"bits: %w", err)
+	}
+
+	chanFeatureBits := lnwire.NewFeatureVector(
+		rawFeatures, lnwire.Features,
+	)
+	if chanFeatureBits.HasFeature(
+		lnwire.SimpleTaprootChannelsOptionalStaging,
+	) {
+
+		pubKey1, err := btcec.ParsePubKey(bitcoinKey1)
+		if err != nil {
+			return nil, err
+		}
+		pubKey2, err := btcec.ParsePubKey(bitcoinKey2)
+		if err != nil {
+			return nil, err
+		}
+
+		fundingScript, _, err := input.GenTaprootFundingScript(
+			pubKey1, pubKey2, 0,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		return fundingScript, nil
+	}
+
+	return legacyFundingScript()
+}
+
 // processUpdate processes a new relate authenticated channel/edge, node or
 // channel/edge update network update. If the update didn't affect the internal
 // state of the draft due to either being out of date, invalid, or redundant,
@@ -1434,7 +1498,7 @@ func (r *ChannelRouter) processUpdate(msg interface{},
 		}
 
 		if err := r.cfg.Graph.AddLightningNode(msg, op...); err != nil {
-			return errors.Errorf("unable to add node %v to the "+
+			return errors.Errorf("unable to add node %x to the "+
 				"graph: %v", msg.PubKeyBytes, err)
 		}
 
@@ -1525,13 +1589,10 @@ func (r *ChannelRouter) processUpdate(msg interface{},
 		// Recreate witness output to be sure that declared in channel
 		// edge bitcoin keys and channel value corresponds to the
 		// reality.
-		witnessScript, err := input.GenMultiSigScript(
+		fundingPkScript, err := makeFundingScript(
 			msg.BitcoinKey1Bytes[:], msg.BitcoinKey2Bytes[:],
+			msg.Features,
 		)
-		if err != nil {
-			return err
-		}
-		pkScript, err := input.WitnessScriptHash(witnessScript)
 		if err != nil {
 			return err
 		}
@@ -1544,7 +1605,7 @@ func (r *ChannelRouter) processUpdate(msg interface{},
 			Locator: &chanvalidate.ShortChanIDChanLocator{
 				ID: channelID,
 			},
-			MultiSigPkScript: pkScript,
+			MultiSigPkScript: fundingPkScript,
 			FundingTx:        fundingTx,
 		})
 		if err != nil {
@@ -1561,10 +1622,6 @@ func (r *ChannelRouter) processUpdate(msg interface{},
 		// Now that we have the funding outpoint of the channel, ensure
 		// that it hasn't yet been spent. If so, then this channel has
 		// been closed so we'll ignore it.
-		fundingPkScript, err := input.WitnessScriptHash(witnessScript)
-		if err != nil {
-			return err
-		}
 		chanUtxo, err := r.cfg.Chain.GetUtxo(
 			fundingPoint, fundingPkScript, channelID.BlockHeight,
 			r.quit,
@@ -2044,7 +2101,7 @@ func (l *LightningPayment) Identifier() [32]byte {
 func (r *ChannelRouter) SendPayment(payment *LightningPayment) ([32]byte,
 	*route.Route, error) {
 
-	paySession, shardTracker, err := r.preparePayment(payment)
+	paySession, shardTracker, err := r.PreparePayment(payment)
 	if err != nil {
 		return [32]byte{}, nil, err
 	}
@@ -2062,11 +2119,8 @@ func (r *ChannelRouter) SendPayment(payment *LightningPayment) ([32]byte,
 
 // SendPaymentAsync is the non-blocking version of SendPayment. The payment
 // result needs to be retrieved via the control tower.
-func (r *ChannelRouter) SendPaymentAsync(payment *LightningPayment) error {
-	paySession, shardTracker, err := r.preparePayment(payment)
-	if err != nil {
-		return err
-	}
+func (r *ChannelRouter) SendPaymentAsync(payment *LightningPayment,
+	ps PaymentSession, st shards.ShardTracker) error {
 
 	// Since this is the first time this payment is being made, we pass nil
 	// for the existing attempt.
@@ -2079,7 +2133,7 @@ func (r *ChannelRouter) SendPaymentAsync(payment *LightningPayment) error {
 
 		_, _, err := r.sendPayment(
 			payment.FeeLimit, payment.Identifier(),
-			payment.PayAttemptTimeout, paySession, shardTracker,
+			payment.PayAttemptTimeout, ps, st,
 		)
 		if err != nil {
 			log.Errorf("Payment %x failed: %v",
@@ -2111,9 +2165,9 @@ func spewPayment(payment *LightningPayment) logClosure {
 	})
 }
 
-// preparePayment creates the payment session and registers the payment with the
+// PreparePayment creates the payment session and registers the payment with the
 // control tower.
-func (r *ChannelRouter) preparePayment(payment *LightningPayment) (
+func (r *ChannelRouter) PreparePayment(payment *LightningPayment) (
 	PaymentSession, shards.ShardTracker, error) {
 
 	// Before starting the HTLC routing attempt, we'll create a fresh
@@ -2746,6 +2800,19 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 	// amount that this route can carry.
 	useMinAmt := amt == nil
 
+	var runningAmt lnwire.MilliSatoshi
+	if useMinAmt {
+		// For minimum amount routes, aim to deliver at least 1 msat to
+		// the destination. There are nodes in the wild that have a
+		// min_htlc channel policy of zero, which could lead to a zero
+		// amount payment being made.
+		runningAmt = 1
+	} else {
+		// If an amount is specified, we need to build a route that
+		// delivers exactly this amount to the final destination.
+		runningAmt = *amt
+	}
+
 	// We'll attempt to obtain a set of bandwidth hints that helps us select
 	// the best outgoing channel to use in case no outgoing channel is set.
 	bandwidthHints, err := newBandwidthManager(
@@ -2762,24 +2829,46 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 		return nil, err
 	}
 
+	sourceNode := r.selfNode.PubKeyBytes
+	unifiers, senderAmt, err := getRouteUnifiers(
+		sourceNode, hops, useMinAmt, runningAmt, outgoingChans,
+		r.cachedGraph, bandwidthHints,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	pathEdges, receiverAmt, err := getPathEdges(
+		sourceNode, senderAmt, unifiers, bandwidthHints, hops,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build and return the final route.
+	return newRoute(
+		sourceNode, pathEdges, uint32(height),
+		finalHopParams{
+			amt:         receiverAmt,
+			totalAmt:    receiverAmt,
+			cltvDelta:   uint16(finalCltvDelta),
+			records:     nil,
+			paymentAddr: payAddr,
+		},
+	)
+}
+
+// getRouteUnifiers returns a list of edge unifiers for the given route.
+func getRouteUnifiers(source route.Vertex, hops []route.Vertex,
+	useMinAmt bool, runningAmt lnwire.MilliSatoshi,
+	outgoingChans map[uint64]struct{}, graph routingGraph,
+	bandwidthHints *bandwidthManager) ([]*edgeUnifier, lnwire.MilliSatoshi,
+	error) {
+
 	// Allocate a list that will contain the edge unifiers for this route.
 	unifiers := make([]*edgeUnifier, len(hops))
 
-	var runningAmt lnwire.MilliSatoshi
-	if useMinAmt {
-		// For minimum amount routes, aim to deliver at least 1 msat to
-		// the destination. There are nodes in the wild that have a
-		// min_htlc channel policy of zero, which could lead to a zero
-		// amount payment being made.
-		runningAmt = 1
-	} else {
-		// If an amount is specified, we need to build a route that
-		// delivers exactly this amount to the final destination.
-		runningAmt = *amt
-	}
-
 	// Traverse hops backwards to accumulate fees in the running amounts.
-	source := r.selfNode.PubKeyBytes
 	for i := len(hops) - 1; i >= 0; i-- {
 		toNode := hops[i]
 
@@ -2796,16 +2885,16 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 		// in the graph.
 		u := newNodeEdgeUnifier(source, toNode, outgoingChans)
 
-		err := u.addGraphPolicies(r.cachedGraph)
+		err := u.addGraphPolicies(graph)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 
 		// Exit if there are no channels.
 		edgeUnifier, ok := u.edgeUnifiers[fromNode]
 		if !ok {
 			log.Errorf("Cannot find policy for node %v", fromNode)
-			return nil, ErrNoChannel{
+			return nil, 0, ErrNoChannel{
 				fromNode: fromNode,
 				position: i,
 			}
@@ -2825,7 +2914,7 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 			log.Errorf("Cannot find policy with amt=%v for node %v",
 				runningAmt, fromNode)
 
-			return nil, ErrNoChannel{
+			return nil, 0, ErrNoChannel{
 				fromNode: fromNode,
 				position: i,
 			}
@@ -2842,17 +2931,31 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 		unifiers[i] = edgeUnifier
 	}
 
+	return unifiers, runningAmt, nil
+}
+
+// getPathEdges returns the edges that make up the path and the total amount,
+// including fees, to send the payment.
+func getPathEdges(source route.Vertex, receiverAmt lnwire.MilliSatoshi,
+	unifiers []*edgeUnifier, bandwidthHints *bandwidthManager,
+	hops []route.Vertex) ([]*channeldb.CachedEdgePolicy,
+	lnwire.MilliSatoshi, error) {
+
 	// Now that we arrived at the start of the route and found out the route
 	// total amount, we make a forward pass. Because the amount may have
 	// been increased in the backward pass, fees need to be recalculated and
 	// amount ranges re-checked.
 	var pathEdges []*channeldb.CachedEdgePolicy
-	receiverAmt := runningAmt
 	for i, unifier := range unifiers {
 		edge := unifier.getEdge(receiverAmt, bandwidthHints)
 		if edge == nil {
-			return nil, ErrNoChannel{
-				fromNode: hops[i-1],
+			fromNode := source
+			if i > 0 {
+				fromNode = hops[i-1]
+			}
+
+			return nil, 0, ErrNoChannel{
+				fromNode: fromNode,
 				position: i,
 			}
 		}
@@ -2867,15 +2970,5 @@ func (r *ChannelRouter) BuildRoute(amt *lnwire.MilliSatoshi,
 		pathEdges = append(pathEdges, edge.policy)
 	}
 
-	// Build and return the final route.
-	return newRoute(
-		source, pathEdges, uint32(height),
-		finalHopParams{
-			amt:         receiverAmt,
-			totalAmt:    receiverAmt,
-			cltvDelta:   uint16(finalCltvDelta),
-			records:     nil,
-			paymentAddr: payAddr,
-		},
-	)
+	return pathEdges, receiverAmt, nil
 }

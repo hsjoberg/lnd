@@ -632,16 +632,16 @@ func (h *HarnessTest) newNodeWithSeed(name string,
 // be used for regular rpc operations.
 func (h *HarnessTest) RestoreNodeWithSeed(name string, extraArgs []string,
 	password []byte, mnemonic []string, rootKey string,
-	recoveryWindow int32, chanBackups *lnrpc.ChanBackupSnapshot,
-	opts ...node.Option) *node.HarnessNode {
+	recoveryWindow int32,
+	chanBackups *lnrpc.ChanBackupSnapshot) *node.HarnessNode {
 
-	node, err := h.manager.newNode(h.T, name, extraArgs, password, true)
+	n, err := h.manager.newNode(h.T, name, extraArgs, password, true)
 	require.NoErrorf(h, err, "unable to create new node for %s", name)
 
 	// Start the node with seed only, which will only create the `State`
 	// and `WalletUnlocker` clients.
-	err = node.StartWithNoAuth(h.runCtx)
-	require.NoErrorf(h, err, "failed to start node %s", node.Name())
+	err = n.StartWithNoAuth(h.runCtx)
+	require.NoErrorf(h, err, "failed to start node %s", n.Name())
 
 	// Create the wallet.
 	initReq := &lnrpc.InitWalletRequest{
@@ -652,11 +652,11 @@ func (h *HarnessTest) RestoreNodeWithSeed(name string, extraArgs []string,
 		RecoveryWindow:     recoveryWindow,
 		ChannelBackups:     chanBackups,
 	}
-	_, err = h.manager.initWalletAndNode(node, initReq)
+	_, err = h.manager.initWalletAndNode(n, initReq)
 	require.NoErrorf(h, err, "failed to unlock and init node %s",
-		node.Name())
+		n.Name())
 
-	return node
+	return n
 }
 
 // NewNodeEtcd starts a new node with seed that'll use an external etcd
@@ -688,7 +688,7 @@ func (h *HarnessTest) NewNodeEtcd(name string, etcdCfg *etcd.Config,
 // database as its storage. The passed cluster flag indicates that we'd like
 // the node to join the cluster leader election.
 func (h *HarnessTest) NewNodeWithSeedEtcd(name string, etcdCfg *etcd.Config,
-	password []byte, entropy []byte, statelessInit, cluster bool,
+	password []byte, statelessInit, cluster bool,
 	leaderSessionTTL int) (*node.HarnessNode, []string, []byte) {
 
 	// We don't want to use the embedded etcd instance.
@@ -890,6 +890,19 @@ type OpenChannelParams struct {
 	// FundMax is a boolean indicating whether the channel should be funded
 	// with the maximum possible amount from the wallet.
 	FundMax bool
+
+	// An optional note-to-self containing some useful information about the
+	// channel. This is stored locally only, and is purely for reference. It
+	// has no bearing on the channel's operation. Max allowed length is 500
+	// characters.
+	Memo string
+
+	// Outpoints is a list of client-selected outpoints that should be used
+	// for funding a channel. If Amt is specified then this amount is
+	// allocated from the sum of outpoints towards funding. If the
+	// FundMax flag is specified the entirety of selected funds is
+	// allocated towards channel funding.
+	Outpoints []*lnrpc.OutPoint
 }
 
 // prepareOpenChannel waits for both nodes to be synced to chain and returns an
@@ -931,6 +944,8 @@ func (h *HarnessTest) prepareOpenChannel(srcNode, destNode *node.HarnessNode,
 		UseBaseFee:         p.UseBaseFee,
 		UseFeeRate:         p.UseFeeRate,
 		FundMax:            p.FundMax,
+		Memo:               p.Memo,
+		Outpoints:          p.Outpoints,
 	}
 }
 
@@ -1125,25 +1140,39 @@ func (h *HarnessTest) CloseChannelAssertPending(hn *node.HarnessNode,
 		ChannelPoint: cp,
 		Force:        force,
 	}
-	stream := hn.RPC.CloseChannel(closeReq)
+
+	var (
+		stream rpc.CloseChanClient
+		event  *lnrpc.CloseStatusUpdate
+		err    error
+	)
 
 	// Consume the "channel close" update in order to wait for the closing
 	// transaction to be broadcast, then wait for the closing tx to be seen
 	// within the network.
-	event, err := h.ReceiveCloseChannelUpdate(stream)
-	if err != nil {
-		// TODO(yy): remove the sleep once the following bug is fixed.
-		// We may receive the error `cannot co-op close channel with
-		// active htlcs` or `link failed to shutdown` if we close the
-		// channel. We need to investigate the order of settling the
-		// payments and updating commitments to properly fix it.
-		time.Sleep(5 * time.Second)
-
-		// Give it another chance.
+	//
+	// TODO(yy): remove the wait once the following bug is fixed.
+	// - https://github.com/lightningnetwork/lnd/issues/6039
+	// We may receive the error `cannot co-op close channel with active
+	// htlcs` or `link failed to shutdown` if we close the channel. We need
+	// to investigate the order of settling the payments and updating
+	// commitments to properly fix it.
+	err = wait.NoError(func() error {
 		stream = hn.RPC.CloseChannel(closeReq)
 		event, err = h.ReceiveCloseChannelUpdate(stream)
-		require.NoError(h, err)
-	}
+		if err != nil {
+			h.Logf("Test: %s, close channel got error: %v",
+				h.manager.currentTestCase, err)
+
+			// NoError predicates every 200ms, which is too
+			// frequent for closing channels. We sleep here to
+			// avoid trying it too much.
+			time.Sleep(2 * time.Second)
+		}
+
+		return err
+	}, wait.ChannelCloseTimeout)
+	require.NoError(h, err, "retry closing channel failed")
 
 	pendingClose, ok := event.Update.(*lnrpc.CloseStatusUpdate_ClosePending)
 	require.Truef(h, ok, "expected channel close update, instead got %v",
@@ -1195,7 +1224,7 @@ func (h *HarnessTest) ForceCloseChannel(hn *node.HarnessNode,
 	closingTxid := h.AssertStreamChannelForceClosed(hn, cp, false, stream)
 
 	// Cleanup the force close.
-	h.CleanupForceClose(hn, cp)
+	h.CleanupForceClose(hn)
 
 	return closingTxid
 }
@@ -1452,9 +1481,7 @@ func (h *HarnessTest) OpenChannelPsbt(srcNode, destNode *node.HarnessNode,
 
 // CleanupForceClose mines a force close commitment found in the mempool and
 // the following sweep transaction from the force closing node.
-func (h *HarnessTest) CleanupForceClose(hn *node.HarnessNode,
-	chanPoint *lnrpc.ChannelPoint) {
-
+func (h *HarnessTest) CleanupForceClose(hn *node.HarnessNode) {
 	// Wait for the channel to be marked pending force close.
 	h.AssertNumPendingForceClose(hn, 1)
 
@@ -1755,10 +1782,12 @@ func (h *HarnessTest) OpenMultiChannelsAsync(
 		// Wait for the channel open event from the stream.
 		cp := h.WaitForChannelOpenEvent(req.stream)
 
-		// Check that both alice and bob have seen the channel
-		// from their channel watch request.
-		h.AssertTopologyChannelOpen(req.Local, cp)
-		h.AssertTopologyChannelOpen(req.Remote, cp)
+		if !req.Param.Private {
+			// Check that both alice and bob have seen the channel
+			// from their channel watch request.
+			h.AssertTopologyChannelOpen(req.Local, cp)
+			h.AssertTopologyChannelOpen(req.Remote, cp)
+		}
 
 		// Finally, check that the channel can be seen in their
 		// ListChannels.

@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"testing/quick"
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -19,10 +20,10 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/davecgh/go-spew/spew"
-	"github.com/go-errors/errors"
 	sphinx "github.com/lightningnetwork/lightning-onion"
 	"github.com/lightningnetwork/lnd/build"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/channeldb/models"
 	"github.com/lightningnetwork/lnd/contractcourt"
 	"github.com/lightningnetwork/lnd/htlcswitch/hodl"
 	"github.com/lightningnetwork/lnd/htlcswitch/hop"
@@ -125,7 +126,7 @@ func createInterceptorFunc(prefix, receiver string, messages []expectedMessage,
 
 		if messageChanID == chanID {
 			if len(expectToReceive) == 0 {
-				return false, errors.Errorf("%v received "+
+				return false, fmt.Errorf("%v received "+
 					"unexpected message out of range: %v",
 					receiver, m.MsgType())
 			}
@@ -134,9 +135,13 @@ func createInterceptorFunc(prefix, receiver string, messages []expectedMessage,
 			expectToReceive = expectToReceive[1:]
 
 			if expectedMessage.message.MsgType() != m.MsgType() {
-				return false, errors.Errorf("%v received wrong message: \n"+
-					"real: %v\nexpected: %v", receiver, m.MsgType(),
-					expectedMessage.message.MsgType())
+				return false, fmt.Errorf(
+					"%v received wrong message: \n"+
+						"real: %v\nexpected: %v",
+					receiver,
+					m.MsgType(),
+					expectedMessage.message.MsgType(),
+				)
 			}
 
 			if debug {
@@ -721,11 +726,10 @@ func TestChannelLinkCancelFullCommitment(t *testing.T) {
 	}
 }
 
-// TestExitNodeTimelockPayloadMismatch tests that when an exit node receives an
-// incoming HTLC, if the time lock encoded in the payload of the forwarded HTLC
-// doesn't match the expected payment value, then the HTLC will be rejected
-// with the appropriate error.
-func TestExitNodeTimelockPayloadMismatch(t *testing.T) {
+// TestExitNodeHLTCTimelockExceedsPayload tests that when an exit node receives
+// an incoming HTLC, if the timelock of the incoming HTLC is greater than or
+// equal to the timelock encoded in the payload, then the HTLC will be accepted.
+func TestExitNodeHTLCTimelockExceedsPayload(t *testing.T) {
 	t.Parallel()
 
 	channels, _, err := createClusterChannels(
@@ -733,35 +737,75 @@ func TestExitNodeTimelockPayloadMismatch(t *testing.T) {
 	)
 	require.NoError(t, err, "unable to create channel")
 
-	n := newThreeHopNetwork(t, channels.aliceToBob, channels.bobToAlice,
-		channels.bobToCarol, channels.carolToBob, testStartingHeight)
-	if err := n.start(); err != nil {
-		t.Fatal(err)
-	}
+	n := newThreeHopNetwork(
+		t, channels.aliceToBob, channels.bobToAlice,
+		channels.bobToCarol, channels.carolToBob, testStartingHeight,
+	)
+	require.NoError(t, n.start())
 	t.Cleanup(n.stop)
 
 	const amount = btcutil.SatoshiPerBitcoin
-	htlcAmt, htlcExpiry, hops := generateHops(amount,
-		testStartingHeight, n.firstBobChannelLink)
+	htlcAmt, htlcExpiry, hops := generateHops(
+		amount, testStartingHeight, n.firstBobChannelLink,
+	)
 
 	// In order to exercise this case, we'll now _manually_ modify the
-	// per-hop payload for outgoing time lock to be the incorrect value.
+	// per-hop payload for outgoing time lock to be a compatible value that
+	// differs from the specified expiry.
 	// The proper value of the outgoing CLTV should be the policy set by
-	// the receiving node, instead we set it to be a random value.
-	hops[0].FwdInfo.OutgoingCTLV = 500
+	// the receiving node, instead we set it to be a value less than the
+	// incoming HTLC timelock.
+	hops[0].FwdInfo.OutgoingCTLV = htlcExpiry - 1
 	firstHop := n.firstBobChannelLink.ShortChanID()
 	_, err = makePayment(
 		n.aliceServer, n.bobServer, firstHop, hops, amount, htlcAmt,
 		htlcExpiry,
 	).Wait(30 * time.Second)
-	if err == nil {
-		t.Fatalf("payment should have failed but didn't")
-	}
+	require.NoError(t, err, "payment should have succeeded but didn't")
+}
 
-	rtErr, ok := err.(ClearTextError)
-	if !ok {
-		t.Fatalf("expected a ClearTextError, instead got: %T", err)
-	}
+// TestExitNodeTimelockPayloadExceedsHTLC tests that when an exit node receives
+// an incoming HTLC, if the timelock encoded in the payload of the forwarded
+// HTLC exceeds the timelock on the incoming HTLC, then the HTLC will be
+// rejected with the appropriate error.
+func TestExitNodeTimelockPayloadExceedsHTLC(t *testing.T) {
+	t.Parallel()
+
+	channels, _, err := createClusterChannels(
+		t, btcutil.SatoshiPerBitcoin*5, btcutil.SatoshiPerBitcoin*5,
+	)
+	require.NoError(t, err, "unable to create channel")
+
+	n := newThreeHopNetwork(
+		t, channels.aliceToBob, channels.bobToAlice,
+		channels.bobToCarol, channels.carolToBob, testStartingHeight,
+	)
+	require.NoError(t, n.start())
+	t.Cleanup(n.stop)
+
+	const amount = btcutil.SatoshiPerBitcoin
+	htlcAmt, htlcExpiry, hops := generateHops(
+		amount, testStartingHeight, n.firstBobChannelLink,
+	)
+
+	// In order to exercise this case, we'll now _manually_ modify the
+	// per-hop payload for outgoing time lock to be the incorrect value.
+	// The proper value of the outgoing CLTV should be the policy set by
+	// the receiving node, instead we set it to be a value greater than the
+	// incoming HTLC timelock.
+	hops[0].FwdInfo.OutgoingCTLV = htlcExpiry + 1
+	firstHop := n.firstBobChannelLink.ShortChanID()
+	_, err = makePayment(
+		n.aliceServer, n.bobServer, firstHop, hops, amount, htlcAmt,
+		htlcExpiry,
+	).Wait(30 * time.Second)
+	require.NotNil(t, err, "payment should have failed but didn't")
+
+	rtErr := &ForwardingError{}
+	require.ErrorAs(
+		t, err, &rtErr, "expected a ClearTextError, instead got: %T",
+		err,
+	)
 
 	switch rtErr.WireMessage().(type) {
 	case *lnwire.FailFinalIncorrectCltvExpiry:
@@ -771,43 +815,97 @@ func TestExitNodeTimelockPayloadMismatch(t *testing.T) {
 	}
 }
 
-// TestExitNodeAmountPayloadMismatch tests that when an exit node receives an
-// incoming HTLC, if the amount encoded in the onion payload of the forwarded
-// HTLC doesn't match the expected payment value, then the HTLC will be
-// rejected.
-func TestExitNodeAmountPayloadMismatch(t *testing.T) {
+// TestExitNodeHTLCUnderpaysPayloadAmount tests that when an exit node receives
+// an incoming HTLC, if the amount offered in the HTLC is less than the amount
+// encoded in the onion payload then the HTLC will be rejected with the
+// appropriate error.
+func TestExitNodeHTLCUnderpaysPayloadAmount(t *testing.T) {
 	t.Parallel()
 
 	channels, _, err := createClusterChannels(
-		t, btcutil.SatoshiPerBitcoin*5, btcutil.SatoshiPerBitcoin*5,
+		t, btcutil.SatoshiPerBitcoin*5,
+		btcutil.SatoshiPerBitcoin*5,
 	)
 	require.NoError(t, err, "unable to create channel")
 
-	n := newThreeHopNetwork(t, channels.aliceToBob, channels.bobToAlice,
-		channels.bobToCarol, channels.carolToBob, testStartingHeight)
-	if err := n.start(); err != nil {
-		t.Fatal(err)
-	}
+	n := newThreeHopNetwork(
+		t, channels.aliceToBob, channels.bobToAlice,
+		channels.bobToCarol, channels.carolToBob,
+		testStartingHeight,
+	)
+	require.NoError(t, n.start())
 	t.Cleanup(n.stop)
 
-	const amount = btcutil.SatoshiPerBitcoin
-	htlcAmt, htlcExpiry, hops := generateHops(amount, testStartingHeight,
-		n.firstBobChannelLink)
+	f := func(underpaymentRand uint64) bool {
+		const amount = btcutil.SatoshiPerBitcoin / 100
+		underpayment := lnwire.MilliSatoshi(
+			underpaymentRand%(amount-1) + 1,
+		)
 
-	// In order to exercise this case, we'll now _manually_ modify the
-	// per-hop payload for amount to be the incorrect value.  The proper
-	// value of the amount to forward should be the amount that the
-	// receiving node expects to receive.
-	hops[0].FwdInfo.AmountToForward = 1
-	firstHop := n.firstBobChannelLink.ShortChanID()
-	_, err = makePayment(
-		n.aliceServer, n.bobServer, firstHop, hops, amount, htlcAmt,
-		htlcExpiry,
-	).Wait(30 * time.Second)
-	if err == nil {
-		t.Fatalf("payment should have failed but didn't")
+		htlcAmt, htlcExpiry, hops := generateHops(
+			amount, testStartingHeight, n.firstBobChannelLink,
+		)
+
+		// In order to exercise this case, we'll now _manually_ modify
+		// the per-hop payload for amount to be the incorrect value.
+		// The acceptable values of the amount to forward should be less
+		// than the incoming HTLC value.
+		hops[0].FwdInfo.AmountToForward = amount + underpayment
+		firstHop := n.firstBobChannelLink.ShortChanID()
+		_, err = makePayment(
+			n.aliceServer, n.bobServer, firstHop, hops, amount,
+			htlcAmt, htlcExpiry,
+		).Wait(30 * time.Second)
+		assertFailureCode(t, err, lnwire.CodeFinalIncorrectHtlcAmount)
+
+		return err != nil
 	}
-	assertFailureCode(t, err, lnwire.CodeFinalIncorrectHtlcAmount)
+	err = quick.Check(f, nil)
+	require.NoError(t, err, "payment should have failed but didn't")
+}
+
+// TestExitNodeHTLCExceedsAmountPayload tests that when an exit node receives an
+// incoming HTLC, if the amount encoded in the onion payload of the forwarded
+// HTLC is lower than the incoming HTLC value, then the HTLC will be accepted.
+func TestExitNodeHTLCExceedsAmountPayload(t *testing.T) {
+	t.Parallel()
+
+	channels, _, err := createClusterChannels(
+		t, btcutil.SatoshiPerBitcoin*5,
+		btcutil.SatoshiPerBitcoin*5,
+	)
+	require.NoError(t, err, "unable to create channel")
+
+	n := newThreeHopNetwork(t, channels.aliceToBob,
+		channels.bobToAlice, channels.bobToCarol,
+		channels.carolToBob, testStartingHeight)
+	require.NoError(t, n.start())
+	t.Cleanup(n.stop)
+
+	f := func(overpaymentRand uint64) bool {
+		const amount = btcutil.SatoshiPerBitcoin / 100
+		overpayment := lnwire.MilliSatoshi(
+			overpaymentRand%(amount-1) + 1,
+		)
+
+		htlcAmt, htlcExpiry, hops := generateHops(amount,
+			testStartingHeight, n.firstBobChannelLink)
+
+		// In order to exercise this case, we'll now _manually_ modify
+		// the per-hop payload for amount to be the incorrect value.
+		// The acceptable values of the amount to forward should be
+		// lower than the incoming HTLC value.
+		hops[0].FwdInfo.AmountToForward = amount - overpayment
+		firstHop := n.firstBobChannelLink.ShortChanID()
+		_, err = makePayment(
+			n.aliceServer, n.bobServer, firstHop, hops, amount,
+			htlcAmt, htlcExpiry,
+		).Wait(30 * time.Second)
+
+		return err == nil
+	}
+	err = quick.Check(f, nil)
+	require.NoError(t, err, "payment should have succeeded but didn't")
 }
 
 // TestLinkForwardTimelockPolicyMismatch tests that if a node is an
@@ -1770,7 +1868,7 @@ func (m *mockPeer) SendMessage(sync bool, msgs ...lnwire.Message) error {
 func (m *mockPeer) SendMessageLazy(sync bool, msgs ...lnwire.Message) error {
 	return m.SendMessage(sync, msgs...)
 }
-func (m *mockPeer) AddNewChannel(_ *channeldb.OpenChannel,
+func (m *mockPeer) AddNewChannel(_ *lnpeer.NewChannel,
 	_ <-chan struct{}) error {
 	return nil
 }
@@ -1788,6 +1886,16 @@ func (m *mockPeer) LocalFeatures() *lnwire.FeatureVector {
 	return nil
 }
 func (m *mockPeer) RemoteFeatures() *lnwire.FeatureVector {
+	return nil
+}
+
+func (m *mockPeer) AddPendingChannel(_ lnwire.ChannelID,
+	_ <-chan struct{}) error {
+
+	return nil
+}
+
+func (m *mockPeer) RemovePendingChannel(_ lnwire.ChannelID) error {
 	return nil
 }
 
@@ -1818,7 +1926,7 @@ func newSingleLinkTestHarness(t *testing.T, chanAmt, chanReserve btcutil.Amount)
 			sentMsgs: make(chan lnwire.Message, 2000),
 			quit:     make(chan struct{}),
 		}
-		globalPolicy = ForwardingPolicy{
+		globalPolicy = models.ForwardingPolicy{
 			MinHTLCOut:    lnwire.NewMSatFromSatoshis(5),
 			MaxHTLC:       lnwire.NewMSatFromSatoshis(chanAmt),
 			BaseFee:       lnwire.NewMSatFromSatoshis(1),
@@ -1954,8 +2062,10 @@ func handleStateUpdate(link *channelLink,
 
 	// Let the remote channel receive the commit sig, and
 	// respond with a revocation + commitsig.
-	err := remoteChannel.ReceiveNewCommitment(
-		commitSig.CommitSig, commitSig.HtlcSigs)
+	err := remoteChannel.ReceiveNewCommitment(&lnwallet.CommitSigs{
+		CommitSig: commitSig.CommitSig,
+		HtlcSigs:  commitSig.HtlcSigs,
+	})
 	if err != nil {
 		return err
 	}
@@ -1966,13 +2076,13 @@ func handleStateUpdate(link *channelLink,
 	}
 	link.HandleChannelUpdate(remoteRev)
 
-	remoteSig, remoteHtlcSigs, _, err := remoteChannel.SignNextCommitment()
+	remoteSigs, err := remoteChannel.SignNextCommitment()
 	if err != nil {
 		return err
 	}
 	commitSig = &lnwire.CommitSig{
-		CommitSig: remoteSig,
-		HtlcSigs:  remoteHtlcSigs,
+		CommitSig: remoteSigs.CommitSig,
+		HtlcSigs:  remoteSigs.HtlcSigs,
 	}
 	link.HandleChannelUpdate(commitSig)
 
@@ -2017,14 +2127,14 @@ func updateState(batchTick chan time.Time, link *channelLink,
 
 	// The remote is triggering the state update, emulate this by
 	// signing and sending CommitSig to the link.
-	remoteSig, remoteHtlcSigs, _, err := remoteChannel.SignNextCommitment()
+	remoteSigs, err := remoteChannel.SignNextCommitment()
 	if err != nil {
 		return err
 	}
 
 	commitSig := &lnwire.CommitSig{
-		CommitSig: remoteSig,
-		HtlcSigs:  remoteHtlcSigs,
+		CommitSig: remoteSigs.CommitSig,
+		HtlcSigs:  remoteSigs.HtlcSigs,
 	}
 	link.HandleChannelUpdate(commitSig)
 
@@ -2057,8 +2167,10 @@ func updateState(batchTick chan time.Time, link *channelLink,
 		return fmt.Errorf("expected CommitSig, got %T", msg)
 	}
 
-	err = remoteChannel.ReceiveNewCommitment(
-		commitSig.CommitSig, commitSig.HtlcSigs)
+	err = remoteChannel.ReceiveNewCommitment(&lnwallet.CommitSigs{
+		CommitSig: commitSig.CommitSig,
+		HtlcSigs:  commitSig.HtlcSigs,
+	})
 	if err != nil {
 		return err
 	}
@@ -3131,7 +3243,10 @@ func TestChannelLinkTrimCircuitsRemoteCommit(t *testing.T) {
 			t.Fatalf("alice did not send commitment signature")
 		}
 
-		err := bobChan.ReceiveNewCommitment(sig.CommitSig, sig.HtlcSigs)
+		err := bobChan.ReceiveNewCommitment(&lnwallet.CommitSigs{
+			CommitSig: sig.CommitSig,
+			HtlcSigs:  sig.HtlcSigs,
+		})
 		if err != nil {
 			t.Fatalf("unable to receive new commitment: %v", err)
 		}
@@ -3512,25 +3627,37 @@ func TestChannelRetransmission(t *testing.T) {
 			// bandwidth of htlc links hasn't been changed.
 			invoice, err = receiver.registry.LookupInvoice(rhash)
 			if err != nil {
-				err = errors.Errorf("unable to get invoice: %v", err)
+				err = fmt.Errorf(
+					"unable to get invoice: %w", err,
+				)
 				continue
 			}
 			if invoice.State != invpkg.ContractSettled {
-				err = errors.Errorf("alice invoice haven't been settled")
+				err = fmt.Errorf(
+					"alice invoice haven't been settled",
+				)
 				continue
 			}
 
 			aliceExpectedBandwidth := aliceBandwidthBefore - htlcAmt
 			if aliceExpectedBandwidth != n.aliceChannelLink.Bandwidth() {
-				err = errors.Errorf("expected alice to have %v, instead has %v",
-					aliceExpectedBandwidth, n.aliceChannelLink.Bandwidth())
+				err = fmt.Errorf(
+					"expected alice to have %v,"+
+						" instead has %v",
+					aliceExpectedBandwidth,
+					n.aliceChannelLink.Bandwidth(),
+				)
 				continue
 			}
 
 			bobExpectedBandwidth := bobBandwidthBefore + htlcAmt
 			if bobExpectedBandwidth != n.firstBobChannelLink.Bandwidth() {
-				err = errors.Errorf("expected bob to have %v, instead has %v",
-					bobExpectedBandwidth, n.firstBobChannelLink.Bandwidth())
+				err = fmt.Errorf(
+					"expected bob to have %v,"+
+						" instead has %v",
+					bobExpectedBandwidth,
+					n.firstBobChannelLink.Bandwidth(),
+				)
 				continue
 			}
 
@@ -4255,7 +4382,7 @@ func (h *persistentLinkHarness) restartLink(
 			quit:     make(chan struct{}),
 		}
 
-		globalPolicy = ForwardingPolicy{
+		globalPolicy = models.ForwardingPolicy{
 			MinHTLCOut:    lnwire.NewMSatFromSatoshis(5),
 			BaseFee:       lnwire.NewMSatFromSatoshis(1),
 			TimeLockDelta: 6,
@@ -4719,9 +4846,10 @@ func TestChannelLinkNoEmptySig(t *testing.T) {
 	ctx.sendCommitSigBobToAlice(1)
 
 	// Now send Bob the signature from Alice covering both htlcs.
-	err = bobChannel.ReceiveNewCommitment(
-		commitSigAlice.CommitSig, commitSigAlice.HtlcSigs,
-	)
+	err = bobChannel.ReceiveNewCommitment(&lnwallet.CommitSigs{
+		CommitSig: commitSigAlice.CommitSig,
+		HtlcSigs:  commitSigAlice.HtlcSigs,
+	})
 	require.NoError(t, err, "bob failed receiving commitment")
 
 	// Both Alice and Bob revoke their previous commitment txes.
@@ -5323,8 +5451,7 @@ func TestChannelLinkFail(t *testing.T) {
 
 				// Sign a commitment that will include
 				// signature for the HTLC just sent.
-				sig, htlcSigs, _, err :=
-					remoteChannel.SignNextCommitment()
+				sigs, err := remoteChannel.SignNextCommitment()
 				if err != nil {
 					t.Fatalf("error signing commitment: %v",
 						err)
@@ -5333,8 +5460,8 @@ func TestChannelLinkFail(t *testing.T) {
 				// Remove the HTLC sig, such that the commit
 				// sig will be invalid.
 				commitSig := &lnwire.CommitSig{
-					CommitSig: sig,
-					HtlcSigs:  htlcSigs[1:],
+					CommitSig: sigs.CommitSig,
+					HtlcSigs:  sigs.HtlcSigs[1:],
 				}
 
 				c.HandleChannelUpdate(commitSig)
@@ -5365,8 +5492,7 @@ func TestChannelLinkFail(t *testing.T) {
 
 				// Sign a commitment that will include
 				// signature for the HTLC just sent.
-				sig, htlcSigs, _, err :=
-					remoteChannel.SignNextCommitment()
+				sigs, err := remoteChannel.SignNextCommitment()
 				if err != nil {
 					t.Fatalf("error signing commitment: %v",
 						err)
@@ -5374,10 +5500,16 @@ func TestChannelLinkFail(t *testing.T) {
 
 				// Flip a bit on the signature, rendering it
 				// invalid.
-				sig[19] ^= 1
+				sigCopy := sigs.CommitSig.Copy()
+				copyBytes := sigCopy.RawBytes()
+				copyBytes[19] ^= 1
+				modifiedSig, err := lnwire.NewSigFromWireECDSA(
+					copyBytes,
+				)
+				require.NoError(t, err)
 				commitSig := &lnwire.CommitSig{
-					CommitSig: sig,
-					HtlcSigs:  htlcSigs,
+					CommitSig: modifiedSig,
+					HtlcSigs:  sigs.HtlcSigs,
 				}
 
 				c.HandleChannelUpdate(commitSig)
@@ -5511,14 +5643,16 @@ func TestExpectedFee(t *testing.T) {
 	}
 
 	for _, test := range testCases {
-		f := ForwardingPolicy{
+		f := models.ForwardingPolicy{
 			BaseFee: test.baseFee,
 			FeeRate: test.feeRate,
 		}
 		fee := ExpectedFee(f, test.htlcAmt)
 		if fee != test.expected {
-			t.Errorf("expected fee to be (%v), instead got (%v)", test.expected,
-				fee)
+			t.Errorf(
+				"expected fee to be (%v), instead got (%v)",
+				test.expected, fee,
+			)
 		}
 	}
 }
@@ -5595,7 +5729,7 @@ func TestCheckHtlcForward(t *testing.T) {
 
 	link := channelLink{
 		cfg: ChannelLinkConfig{
-			FwrdingPolicy: ForwardingPolicy{
+			FwrdingPolicy: models.ForwardingPolicy{
 				TimeLockDelta: 20,
 				MinHTLCOut:    500,
 				MaxHTLC:       1000,

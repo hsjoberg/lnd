@@ -64,44 +64,6 @@ const (
 	DefaultMaxLinkFeeAllocation float64 = 0.5
 )
 
-// ForwardingPolicy describes the set of constraints that a given ChannelLink
-// is to adhere to when forwarding HTLC's. For each incoming HTLC, this set of
-// constraints will be consulted in order to ensure that adequate fees are
-// paid, and our time-lock parameters are respected. In the event that an
-// incoming HTLC violates any of these constraints, it is to be _rejected_ with
-// the error possibly carrying along a ChannelUpdate message that includes the
-// latest policy.
-type ForwardingPolicy struct {
-	// MinHTLC is the smallest HTLC that is to be forwarded.
-	MinHTLCOut lnwire.MilliSatoshi
-
-	// MaxHTLC is the largest HTLC that is to be forwarded.
-	MaxHTLC lnwire.MilliSatoshi
-
-	// BaseFee is the base fee, expressed in milli-satoshi that must be
-	// paid for each incoming HTLC. This field, combined with FeeRate is
-	// used to compute the required fee for a given HTLC.
-	BaseFee lnwire.MilliSatoshi
-
-	// FeeRate is the fee rate, expressed in milli-satoshi that must be
-	// paid for each incoming HTLC. This field combined with BaseFee is
-	// used to compute the required fee for a given HTLC.
-	FeeRate lnwire.MilliSatoshi
-
-	// TimeLockDelta is the absolute time-lock value, expressed in blocks,
-	// that will be subtracted from an incoming HTLC's timelock value to
-	// create the time-lock value for the forwarded outgoing HTLC. The
-	// following constraint MUST hold for an HTLC to be forwarded:
-	//
-	//  * incomingHtlc.timeLock - timeLockDelta = fwdInfo.OutgoingCTLV
-	//
-	//    where fwdInfo is the forwarding information extracted from the
-	//    per-hop payload of the incoming HTLC's onion packet.
-	TimeLockDelta uint32
-
-	// TODO(roasbeef): add fee module inside of switch
-}
-
 // ExpectedFee computes the expected fee for a given htlc amount. The value
 // returned from this function is to be used as a sanity check when forwarding
 // HTLC's to ensure that an incoming HTLC properly adheres to our propagated
@@ -109,7 +71,7 @@ type ForwardingPolicy struct {
 //
 // TODO(roasbeef): also add in current available channel bandwidth, inverse
 // func
-func ExpectedFee(f ForwardingPolicy,
+func ExpectedFee(f models.ForwardingPolicy,
 	htlcAmt lnwire.MilliSatoshi) lnwire.MilliSatoshi {
 
 	return f.BaseFee + (htlcAmt*f.FeeRate)/1000000
@@ -123,7 +85,7 @@ type ChannelLinkConfig struct {
 	// deciding whether to forwarding incoming HTLC's or not. This value
 	// can be updated with subsequent calls to UpdateForwardingPolicy
 	// targeted at a given ChannelLink concrete interface implementation.
-	FwrdingPolicy ForwardingPolicy
+	FwrdingPolicy models.ForwardingPolicy
 
 	// Circuits provides restricted access to the switch's circuit map,
 	// allowing the link to open and close circuits.
@@ -698,7 +660,6 @@ func (l *channelLink) syncChanStates() error {
 		return fmt.Errorf("unable to generate chan sync message for "+
 			"ChannelPoint(%v)", l.channel.ChannelPoint())
 	}
-
 	if err := l.cfg.Peer.SendMessage(true, localChanSyncMsg); err != nil {
 		return fmt.Errorf("unable to send chan sync message for "+
 			"ChannelPoint(%v): %v", l.channel.ChannelPoint(), err)
@@ -722,7 +683,7 @@ func (l *channelLink) syncChanStates() error {
 
 		// If the remote party indicates that they think we haven't
 		// done any state updates yet, then we'll retransmit the
-		// funding locked message first. We do this, as at this point
+		// channel_ready message first. We do this, as at this point
 		// we can't be sure if they've really received the
 		// ChannelReady message.
 		if remoteChanSyncMsg.NextLocalCommitHeight == 1 &&
@@ -740,6 +701,14 @@ func (l *channelLink) syncChanStates() error {
 			channelReadyMsg := lnwire.NewChannelReady(
 				l.ChanID(), nextRevocation,
 			)
+
+			// If this is a taproot channel, then we'll send the
+			// very same nonce that we sent above, as they should
+			// take the latest verification nonce we send.
+			if chanState.ChanType.IsTaproot() {
+				//nolint:lll
+				channelReadyMsg.NextLocalNonce = localChanSyncMsg.LocalNonce
+			}
 
 			// For channels that negotiated the option-scid-alias
 			// feature bit, ensure that we send over the alias in
@@ -1091,7 +1060,7 @@ func (l *channelLink) htlcManager() {
 	// allow the switch to forward HTLCs in the outbound direction.
 	l.markReestablished()
 
-	// Now that we've received both funding locked and channel reestablish,
+	// Now that we've received both channel_ready and channel reestablish,
 	// we can go ahead and send the active channel notification. We'll also
 	// defer the inactive notification for when the link exits to ensure
 	// that every active notification is matched by an inactive one.
@@ -1929,15 +1898,19 @@ func (l *channelLink) handleUpstreamMsg(msg lnwire.Message) {
 		// Instead of truncating the slice to conserve memory
 		// allocations, we simply set the uncommitted preimage slice to
 		// nil so that a new one will be initialized if any more
-		// witnesses are discovered. We do this maximum size of the
-		// slice can occupy 15KB, and want to ensure we release that
-		// memory back to the runtime.
+		// witnesses are discovered. We do this because the maximum size
+		// that the slice can occupy is 15KB, and we want to ensure we
+		// release that memory back to the runtime.
 		l.uncommittedPreimages = nil
 
 		// We just received a new updates to our local commitment
 		// chain, validate this new commitment, closing the link if
 		// invalid.
-		err = l.channel.ReceiveNewCommitment(msg.CommitSig, msg.HtlcSigs)
+		err = l.channel.ReceiveNewCommitment(&lnwallet.CommitSigs{
+			CommitSig:  msg.CommitSig,
+			HtlcSigs:   msg.HtlcSigs,
+			PartialSig: msg.PartialSig,
+		})
 		if err != nil {
 			// If we were unable to reconstruct their proposed
 			// commitment, then we'll examine the type of error. If
@@ -2027,11 +2000,6 @@ func (l *channelLink) handleUpstreamMsg(msg lnwire.Message) {
 		// We've received a revocation from the remote chain, if valid,
 		// this moves the remote chain forward, and expands our
 		// revocation window.
-		//
-		// Before advancing our remote chain, we will record the
-		// current commit tx, which is used by the TowerClient to
-		// create backups.
-		oldCommitTx := l.channel.State().RemoteCommitment.CommitTx
 
 		// We now process the message and advance our remote commit
 		// chain.
@@ -2068,24 +2036,15 @@ func (l *channelLink) handleUpstreamMsg(msg lnwire.Message) {
 		// create a backup for the current state.
 		if l.cfg.TowerClient != nil {
 			state := l.channel.State()
-			breachInfo, err := lnwallet.NewBreachRetribution(
-				state, state.RemoteCommitment.CommitHeight-1, 0,
-				// OldCommitTx is the breaching tx at height-1.
-				oldCommitTx,
-			)
-			if err != nil {
-				l.fail(LinkFailureError{code: ErrInternalError},
-					"failed to load breach info: %v", err)
-				return
-			}
-
 			chanID := l.ChanID()
+
 			err = l.cfg.TowerClient.BackupState(
-				&chanID, breachInfo, state.ChanType,
+				&chanID, state.RemoteCommitment.CommitHeight-1,
 			)
 			if err != nil {
 				l.fail(LinkFailureError{code: ErrInternalError},
-					"unable to queue breach backup: %v", err)
+					"unable to queue breach backup: %v",
+					err)
 				return
 			}
 		}
@@ -2267,7 +2226,7 @@ func (l *channelLink) updateCommitTx() error {
 		return nil
 	}
 
-	theirCommitSig, htlcSigs, pendingHTLCs, err := l.channel.SignNextCommitment()
+	newCommit, err := l.channel.SignNextCommitment()
 	if err == lnwallet.ErrNoWindow {
 		l.cfg.PendingCommitTicker.Resume()
 		l.log.Trace("PendingCommitTicker resumed")
@@ -2299,7 +2258,7 @@ func (l *channelLink) updateCommitTx() error {
 	// pending).
 	newUpdate := &contractcourt.ContractUpdate{
 		HtlcKey: contractcourt.RemotePendingHtlcSet,
-		Htlcs:   pendingHTLCs,
+		Htlcs:   newCommit.PendingHTLCs,
 	}
 	err = l.cfg.NotifyContractUpdate(newUpdate)
 	if err != nil {
@@ -2314,9 +2273,10 @@ func (l *channelLink) updateCommitTx() error {
 	}
 
 	commitSig := &lnwire.CommitSig{
-		ChanID:    l.ChanID(),
-		CommitSig: theirCommitSig,
-		HtlcSigs:  htlcSigs,
+		ChanID:     l.ChanID(),
+		CommitSig:  newCommit.CommitSig,
+		HtlcSigs:   newCommit.HtlcSigs,
+		PartialSig: newCommit.PartialSig,
 	}
 	l.cfg.Peer.SendMessage(false, commitSig)
 
@@ -2536,7 +2496,9 @@ func (l *channelLink) AttachMailBox(mailbox MailBox) {
 // update all of the link's FwrdingPolicy's values.
 //
 // NOTE: Part of the ChannelLink interface.
-func (l *channelLink) UpdateForwardingPolicy(newPolicy ForwardingPolicy) {
+func (l *channelLink) UpdateForwardingPolicy(
+	newPolicy models.ForwardingPolicy) {
+
 	l.Lock()
 	defer l.Unlock()
 
@@ -2641,7 +2603,7 @@ func (l *channelLink) CheckHtlcTransit(payHash [32]byte,
 
 // canSendHtlc checks whether the given htlc parameters satisfy
 // the channel's amount and time lock constraints.
-func (l *channelLink) canSendHtlc(policy ForwardingPolicy,
+func (l *channelLink) canSendHtlc(policy models.ForwardingPolicy,
 	payHash [32]byte, amt lnwire.MilliSatoshi, timeout uint32,
 	heightNow uint32, originalScid lnwire.ShortChannelID) *LinkError {
 
@@ -2790,7 +2752,7 @@ func (l *channelLink) ShutdownIfChannelClean() error {
 // updateChannelFee updates the commitment fee-per-kw on this channel by
 // committing to an update_fee message.
 func (l *channelLink) updateChannelFee(feePerKw chainfee.SatPerKWeight) error {
-	l.log.Infof("updating commit fee to %v sat/kw", feePerKw)
+	l.log.Infof("updating commit fee to %v", feePerKw)
 
 	// We skip sending the UpdateFee message if the channel is not
 	// currently eligible to forward messages.
@@ -3251,11 +3213,10 @@ func (l *channelLink) processExitHop(pd *lnwallet.PaymentDescriptor,
 
 	// As we're the exit hop, we'll double check the hop-payload included in
 	// the HTLC to ensure that it was crafted correctly by the sender and
-	// matches the HTLC we were extended.
-	if pd.Amount != fwdInfo.AmountToForward {
-
-		l.log.Errorf("onion payload of incoming htlc(%x) has incorrect "+
-			"value: expected %v, got %v", pd.RHash,
+	// is compatible with the HTLC we were extended.
+	if pd.Amount < fwdInfo.AmountToForward {
+		l.log.Errorf("onion payload of incoming htlc(%x) has "+
+			"incompatible value: expected <=%v, got %v", pd.RHash,
 			pd.Amount, fwdInfo.AmountToForward)
 
 		failure := NewLinkError(
@@ -3268,9 +3229,9 @@ func (l *channelLink) processExitHop(pd *lnwallet.PaymentDescriptor,
 
 	// We'll also ensure that our time-lock value has been computed
 	// correctly.
-	if pd.Timeout != fwdInfo.OutgoingCTLV {
-		l.log.Errorf("onion payload of incoming htlc(%x) has incorrect "+
-			"time-lock: expected %v, got %v",
+	if pd.Timeout < fwdInfo.OutgoingCTLV {
+		l.log.Errorf("onion payload of incoming htlc(%x) has "+
+			"incompatible time-lock: expected <=%v, got %v",
 			pd.RHash[:], pd.Timeout, fwdInfo.OutgoingCTLV)
 
 		failure := NewLinkError(

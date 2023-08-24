@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,16 +18,15 @@ import (
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/lightninglabs/protobuf-hex-display/json"
-	"github.com/lightninglabs/protobuf-hex-display/jsonpb"
-	"github.com/lightninglabs/protobuf-hex-display/proto"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/routing"
 	"github.com/lightningnetwork/lnd/routing/route"
 	"github.com/lightningnetwork/lnd/signal"
 	"github.com/urfave/cli"
+	"golang.org/x/term"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // TODO(roasbeef): cli logic for supporting both positional and unix style
@@ -71,19 +71,13 @@ func printJSON(resp interface{}) {
 }
 
 func printRespJSON(resp proto.Message) {
-	jsonMarshaler := &jsonpb.Marshaler{
-		EmitDefaults: true,
-		OrigName:     true,
-		Indent:       "    ",
-	}
-
-	jsonStr, err := jsonMarshaler.MarshalToString(resp)
+	jsonBytes, err := lnrpc.ProtoJSONMarshalOpts.Marshal(resp)
 	if err != nil {
 		fmt.Println("unable to decode response: ", err)
 		return
 	}
 
-	fmt.Println(jsonStr)
+	fmt.Printf("%s\n", jsonBytes)
 }
 
 // actionDecorator is used to add additional information and error handling
@@ -139,6 +133,11 @@ var newAddressCommand = cli.Command{
 			Usage: "(optional) the name of the account to " +
 				"generate a new address for",
 		},
+		cli.BoolFlag{
+			Name: "unused",
+			Usage: "(optional) return the last unused address " +
+				"instead of generating a new one",
+		},
 	},
 	Description: `
 	Generate a wallet new address. Address-types has to be one of:
@@ -160,14 +159,25 @@ func newAddress(ctx *cli.Context) error {
 	// Map the string encoded address type, to the concrete typed address
 	// type enum. An unrecognized address type will result in an error.
 	stringAddrType := ctx.Args().First()
+	unused := ctx.Bool("unused")
+
 	var addrType lnrpc.AddressType
 	switch stringAddrType { // TODO(roasbeef): make them ints on the cli?
 	case "p2wkh":
 		addrType = lnrpc.AddressType_WITNESS_PUBKEY_HASH
+		if unused {
+			addrType = lnrpc.AddressType_UNUSED_WITNESS_PUBKEY_HASH
+		}
 	case "np2wkh":
 		addrType = lnrpc.AddressType_NESTED_PUBKEY_HASH
+		if unused {
+			addrType = lnrpc.AddressType_UNUSED_NESTED_PUBKEY_HASH
+		}
 	case "p2tr":
 		addrType = lnrpc.AddressType_TAPROOT_PUBKEY
+		if unused {
+			addrType = lnrpc.AddressType_UNUSED_TAPROOT_PUBKEY
+		}
 	default:
 		return fmt.Errorf("invalid address type %v, support address type "+
 			"are: p2wkh, np2wkh, and p2tr", stringAddrType)
@@ -293,6 +303,14 @@ var sendCoinsCommand = cli.Command{
 				"must satisfy",
 			Value: defaultUtxoMinConf,
 		},
+		cli.BoolFlag{
+			Name: "force, f",
+			Usage: "if set, the transaction will be broadcast " +
+				"without asking for confirmation; this is " +
+				"set to true by default if stdout is not a " +
+				"terminal avoid breaking existing shell " +
+				"scripts",
+		},
 		txLabelFlag,
 	},
 	Action: actionDecorator(sendCoins),
@@ -353,6 +371,19 @@ func sendCoins(ctx *cli.Context) error {
 	if amt != 0 && ctx.Bool("sweepall") {
 		return fmt.Errorf("amount cannot be set if attempting to " +
 			"sweep all coins out of the wallet")
+	}
+
+	// Ask for confirmation if we're on an actual terminal and the output is
+	// not being redirected to another command. This prevents existing shell
+	// scripts from breaking.
+	if !ctx.Bool("force") && term.IsTerminal(int(os.Stdout.Fd())) {
+		fmt.Printf("Amount: %d\n", amt)
+		fmt.Printf("Destination address: %v\n", addr)
+
+		confirm := promptForConfirmation("Confirm payment (yes/no): ")
+		if !confirm {
+			return nil
+		}
 	}
 
 	client, cleanUp := getClient(ctx)
@@ -1283,7 +1314,15 @@ var walletBalanceCommand = cli.Command{
 	Name:     "walletbalance",
 	Category: "Wallet",
 	Usage:    "Compute and display the wallet's current balance.",
-	Action:   actionDecorator(walletBalance),
+	Flags: []cli.Flag{
+		cli.StringFlag{
+			Name: "account",
+			Usage: "(optional) the account for which the balance " +
+				"is shown",
+			Value: "",
+		},
+	},
+	Action: actionDecorator(walletBalance),
 }
 
 func walletBalance(ctx *cli.Context) error {
@@ -1291,7 +1330,9 @@ func walletBalance(ctx *cli.Context) error {
 	client, cleanUp := getClient(ctx)
 	defer cleanUp()
 
-	req := &lnrpc.WalletBalanceRequest{}
+	req := &lnrpc.WalletBalanceRequest{
+		Account: ctx.String("account"),
+	}
 	resp, err := client.WalletBalance(ctxc, req)
 	if err != nil {
 		return err
@@ -2003,32 +2044,35 @@ var updateChannelPolicyCommand = cli.Command{
 	ArgsUsage: "base_fee_msat fee_rate time_lock_delta " +
 		"[--max_htlc_msat=N] [channel_point]",
 	Description: `
-	Updates the channel policy for all channels, or just a particular channel
-	identified by its channel point. The update will be committed, and
-	broadcast to the rest of the network within the next batch.
-	Channel points are encoded as: funding_txid:output_index`,
+	Updates the channel policy for all channels, or just a particular
+        channel identified by its channel point. The update will be committed, 
+	and broadcast to the rest of the network within the next batch. Channel
+        points are encoded as: funding_txid:output_index
+	`,
 	Flags: []cli.Flag{
 		cli.Int64Flag{
 			Name: "base_fee_msat",
-			Usage: "the base fee in milli-satoshis that will " +
-				"be charged for each forwarded HTLC, regardless " +
+			Usage: "the base fee in milli-satoshis that will be " +
+				"charged for each forwarded HTLC, regardless " +
 				"of payment size",
 		},
 		cli.StringFlag{
 			Name: "fee_rate",
 			Usage: "the fee rate that will be charged " +
 				"proportionally based on the value of each " +
-				"forwarded HTLC, the lowest possible rate is 0 " +
-				"with a granularity of 0.000001 (millionths). Can not " +
-				"be set at the same time as fee_rate_ppm.",
+				"forwarded HTLC, the lowest possible rate is " +
+				"0 with a granularity of 0.000001 " +
+				"(millionths). Can not be set at the same " +
+				"time as fee_rate_ppm",
 		},
 		cli.Uint64Flag{
 			Name: "fee_rate_ppm",
 			Usage: "the fee rate ppm (parts per million) that " +
-				"will be charged proportionally based on the value of each " +
-				"forwarded HTLC, the lowest possible rate is 0 " +
-				"with a granularity of 0.000001 (millionths). Can not " +
-				"be set at the same time as fee_rate.",
+				"will be charged proportionally based on the " +
+				"value of each forwarded HTLC, the lowest " +
+				"possible rate is 0 with a granularity of " +
+				"0.000001 (millionths). Can not be set at " +
+				"the same time as fee_rate",
 		},
 		cli.Uint64Flag{
 			Name: "time_lock_delta",
@@ -2037,21 +2081,22 @@ var updateChannelPolicyCommand = cli.Command{
 		},
 		cli.Uint64Flag{
 			Name: "min_htlc_msat",
-			Usage: "if set, the min HTLC size that will be applied " +
-				"to all forwarded HTLCs. If unset, the min HTLC " +
-				"is left unchanged.",
+			Usage: "if set, the min HTLC size that will be " +
+				"applied to all forwarded HTLCs. If unset, " +
+				"the min HTLC is left unchanged",
 		},
 		cli.Uint64Flag{
 			Name: "max_htlc_msat",
-			Usage: "if set, the max HTLC size that will be applied " +
-				"to all forwarded HTLCs. If unset, the max HTLC " +
-				"is left unchanged.",
+			Usage: "if set, the max HTLC size that will be " +
+				"applied to all forwarded HTLCs. If unset, " +
+				"the max HTLC is left unchanged",
 		},
 		cli.StringFlag{
 			Name: "chan_point",
-			Usage: "The channel whose fee policy should be " +
-				"updated, if nil the policies for all channels " +
-				"will be updated. Takes the form of: txid:output_index",
+			Usage: "the channel which this policy update should " +
+				"be applied to. If nil, the policies for all " +
+				"channels will be updated. Takes the form of " +
+				"txid:output_index",
 		},
 	},
 	Action: actionDecorator(updateChannelPolicy),
@@ -2081,12 +2126,10 @@ func parseChanPoint(s string) (*lnrpc.ChannelPoint, error) {
 	}, nil
 }
 
-// parseTimeLockDelta is expected to get a uint16 type of timeLockDelta,
-// which maximum value is MaxTimeLockDelta.
+// parseTimeLockDelta is expected to get a uint16 type of timeLockDelta. Its
+// maximum value is MaxTimeLockDelta.
 func parseTimeLockDelta(timeLockDeltaStr string) (uint16, error) {
-	timeLockDeltaUnCheck, err := strconv.ParseUint(
-		timeLockDeltaStr, 10, 64,
-	)
+	timeLockDeltaUnCheck, err := strconv.ParseUint(timeLockDeltaStr, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("failed to parse time_lock_delta: %s "+
 			"to uint64, err: %v", timeLockDeltaStr, err)

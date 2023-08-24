@@ -10,6 +10,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/go-errors/errors"
 	mig "github.com/lightningnetwork/lnd/channeldb/migration"
 	"github.com/lightningnetwork/lnd/channeldb/migration12"
@@ -24,6 +25,7 @@ import (
 	"github.com/lightningnetwork/lnd/channeldb/migration27"
 	"github.com/lightningnetwork/lnd/channeldb/migration29"
 	"github.com/lightningnetwork/lnd/channeldb/migration30"
+	"github.com/lightningnetwork/lnd/channeldb/migration31"
 	"github.com/lightningnetwork/lnd/channeldb/migration_01_to_11"
 	"github.com/lightningnetwork/lnd/clock"
 	"github.com/lightningnetwork/lnd/kvdb"
@@ -275,6 +277,14 @@ var (
 			number:    29,
 			migration: migration29.MigrateChanID,
 		},
+		{
+			// Removes the "sweeper-last-tx" bucket. Although we
+			// do not have a mandatory version 30 we skip this
+			// version because its naming is already used for the
+			// first optional migration.
+			number:    31,
+			migration: migration31.DeleteLastPublishedTxTLB,
+		},
 	}
 
 	// optionalVersions stores all optional migrations that are applied
@@ -302,11 +312,6 @@ var (
 	// channelOpeningState for each channel that is currently in the process
 	// of being opened.
 	channelOpeningStateBucket = []byte("channelOpeningState")
-
-	// initialChannelFwdingPolicyBucket is the database bucket used to store
-	// the forwarding policy for each permanent channel that is currently
-	// in the process of being opened.
-	initialChannelFwdingPolicyBucket = []byte("initialChannelFwdingPolicy")
 )
 
 // DB is the primary datastore for the lnd daemon. The database stores
@@ -654,19 +659,93 @@ func (c *ChannelStateDB) fetchNodeChannels(chainBucket kvdb.RBucket) (
 
 // FetchChannel attempts to locate a channel specified by the passed channel
 // point. If the channel cannot be found, then an error will be returned.
-// Optionally an existing db tx can be supplied. Optionally an existing db tx
-// can be supplied.
+// Optionally an existing db tx can be supplied.
 func (c *ChannelStateDB) FetchChannel(tx kvdb.RTx, chanPoint wire.OutPoint) (
 	*OpenChannel, error) {
 
-	var (
-		targetChan      *OpenChannel
-		targetChanPoint bytes.Buffer
-	)
-
+	var targetChanPoint bytes.Buffer
 	if err := writeOutpoint(&targetChanPoint, &chanPoint); err != nil {
 		return nil, err
 	}
+
+	targetChanPointBytes := targetChanPoint.Bytes()
+	selector := func(chainBkt walletdb.ReadBucket) ([]byte, *wire.OutPoint,
+		error) {
+
+		return targetChanPointBytes, &chanPoint, nil
+	}
+
+	return c.channelScanner(tx, selector)
+}
+
+// FetchChannelByID attempts to locate a channel specified by the passed channel
+// ID. If the channel cannot be found, then an error will be returned.
+// Optionally an existing db tx can be supplied.
+func (c *ChannelStateDB) FetchChannelByID(tx kvdb.RTx, id lnwire.ChannelID) (
+	*OpenChannel, error) {
+
+	selector := func(chainBkt walletdb.ReadBucket) ([]byte, *wire.OutPoint,
+		error) {
+
+		var (
+			targetChanPointBytes []byte
+			targetChanPoint      *wire.OutPoint
+
+			// errChanFound is used to signal that the channel has
+			// been found so that iteration through the DB buckets
+			// can stop.
+			errChanFound = errors.New("channel found")
+		)
+		err := chainBkt.ForEach(func(k, _ []byte) error {
+			var outPoint wire.OutPoint
+			err := readOutpoint(bytes.NewReader(k), &outPoint)
+			if err != nil {
+				return err
+			}
+
+			chanID := lnwire.NewChanIDFromOutPoint(&outPoint)
+			if chanID != id {
+				return nil
+			}
+
+			targetChanPoint = &outPoint
+			targetChanPointBytes = k
+
+			return errChanFound
+		})
+		if err != nil && !errors.Is(err, errChanFound) {
+			return nil, nil, err
+		}
+		if targetChanPoint == nil {
+			return nil, nil, ErrChannelNotFound
+		}
+
+		return targetChanPointBytes, targetChanPoint, nil
+	}
+
+	return c.channelScanner(tx, selector)
+}
+
+// channelSelector describes a function that takes a chain-hash bucket from
+// within the open-channel DB and returns the wanted channel point bytes, and
+// channel point. It must return the ErrChannelNotFound error if the wanted
+// channel is not in the given bucket.
+type channelSelector func(chainBkt walletdb.ReadBucket) ([]byte, *wire.OutPoint,
+	error)
+
+// channelScanner will traverse the DB to each chain-hash bucket of each node
+// pub-key bucket in the open-channel-bucket. The chanSelector will then be used
+// to fetch the wanted channel outpoint from the chain bucket.
+func (c *ChannelStateDB) channelScanner(tx kvdb.RTx,
+	chanSelect channelSelector) (*OpenChannel, error) {
+
+	var (
+		targetChan *OpenChannel
+
+		// errChanFound is used to signal that the channel has been
+		// found so that iteration through the DB buckets can stop.
+		errChanFound = errors.New("channel found")
+	)
 
 	// chanScan will traverse the following bucket structure:
 	//  * nodePub => chainHash => chanPoint
@@ -685,8 +764,8 @@ func (c *ChannelStateDB) FetchChannel(tx kvdb.RTx, chanPoint wire.OutPoint) (
 		}
 
 		// Within the node channel bucket, are the set of node pubkeys
-		// we have channels with, we don't know the entire set, so
-		// we'll check them all.
+		// we have channels with, we don't know the entire set, so we'll
+		// check them all.
 		return openChanBucket.ForEach(func(nodePub, v []byte) error {
 			// Ensure that this is a key the same size as a pubkey,
 			// and also that it leads directly to a bucket.
@@ -694,7 +773,9 @@ func (c *ChannelStateDB) FetchChannel(tx kvdb.RTx, chanPoint wire.OutPoint) (
 				return nil
 			}
 
-			nodeChanBucket := openChanBucket.NestedReadBucket(nodePub)
+			nodeChanBucket := openChanBucket.NestedReadBucket(
+				nodePub,
+			)
 			if nodeChanBucket == nil {
 				return nil
 			}
@@ -715,20 +796,30 @@ func (c *ChannelStateDB) FetchChannel(tx kvdb.RTx, chanPoint wire.OutPoint) (
 				)
 				if chainBucket == nil {
 					return fmt.Errorf("unable to read "+
-						"bucket for chain=%x", chainHash[:])
+						"bucket for chain=%x",
+						chainHash)
 				}
 
-				// Finally we reach the leaf bucket that stores
+				// Finally, we reach the leaf bucket that stores
 				// all the chanPoints for this node.
+				targetChanBytes, chanPoint, err := chanSelect(
+					chainBucket,
+				)
+				if errors.Is(err, ErrChannelNotFound) {
+					return nil
+				} else if err != nil {
+					return err
+				}
+
 				chanBucket := chainBucket.NestedReadBucket(
-					targetChanPoint.Bytes(),
+					targetChanBytes,
 				)
 				if chanBucket == nil {
 					return nil
 				}
 
 				channel, err := fetchOpenChannel(
-					chanBucket, &chanPoint,
+					chanBucket, chanPoint,
 				)
 				if err != nil {
 					return err
@@ -737,7 +828,7 @@ func (c *ChannelStateDB) FetchChannel(tx kvdb.RTx, chanPoint wire.OutPoint) (
 				targetChan = channel
 				targetChan.Db = c
 
-				return nil
+				return errChanFound
 			})
 		})
 	}
@@ -748,7 +839,7 @@ func (c *ChannelStateDB) FetchChannel(tx kvdb.RTx, chanPoint wire.OutPoint) (
 	} else {
 		err = chanScan(tx)
 	}
-	if err != nil {
+	if err != nil && !errors.Is(err, errChanFound) {
 		return nil, err
 	}
 
@@ -757,7 +848,7 @@ func (c *ChannelStateDB) FetchChannel(tx kvdb.RTx, chanPoint wire.OutPoint) (
 	}
 
 	// If we can't find the channel, then we return with an error, as we
-	// have nothing to  backup.
+	// have nothing to back up.
 	return nil, ErrChannelNotFound
 }
 
@@ -1335,64 +1426,6 @@ func (c *ChannelStateDB) AbandonChannel(chanPoint *wire.OutPoint,
 	// caller. We set ourselves as the close initiator because we abandoned
 	// the channel.
 	return dbChan.CloseChannel(summary, ChanStatusLocalCloseInitiator)
-}
-
-// SaveInitialFwdingPolicy saves the serialized forwarding policy for the
-// provided permanent channel id to the initialChannelFwdingPolicyBucket.
-func (c *ChannelStateDB) SaveInitialFwdingPolicy(chanID,
-	forwardingPolicy []byte) error {
-
-	return kvdb.Update(c.backend, func(tx kvdb.RwTx) error {
-		bucket, err := tx.CreateTopLevelBucket(
-			initialChannelFwdingPolicyBucket,
-		)
-		if err != nil {
-			return err
-		}
-
-		return bucket.Put(chanID, forwardingPolicy)
-	}, func() {})
-}
-
-// GetInitialFwdingPolicy fetches the serialized forwarding policy for the
-// provided channel id from the database, or returns ErrChannelNotFound if
-// a forwarding policy for this channel id is not found.
-func (c *ChannelStateDB) GetInitialFwdingPolicy(chanID []byte) ([]byte, error) {
-	var serializedState []byte
-	err := kvdb.View(c.backend, func(tx kvdb.RTx) error {
-		bucket := tx.ReadBucket(initialChannelFwdingPolicyBucket)
-		if bucket == nil {
-			// If the bucket does not exist, it means we
-			// never added a channel fees to the db, so
-			// return ErrChannelNotFound.
-			return ErrChannelNotFound
-		}
-
-		stateBytes := bucket.Get(chanID)
-		if stateBytes == nil {
-			return ErrChannelNotFound
-		}
-
-		serializedState = append(serializedState, stateBytes...)
-
-		return nil
-	}, func() {
-		serializedState = nil
-	})
-	return serializedState, err
-}
-
-// DeleteInitialFwdingPolicy removes the forwarding policy for a given channel
-// from the database.
-func (c *ChannelStateDB) DeleteInitialFwdingPolicy(chanID []byte) error {
-	return kvdb.Update(c.backend, func(tx kvdb.RwTx) error {
-		bucket := tx.ReadWriteBucket(initialChannelFwdingPolicyBucket)
-		if bucket == nil {
-			return ErrChannelNotFound
-		}
-
-		return bucket.Delete(chanID)
-	}, func() {})
 }
 
 // SaveChannelOpeningState saves the serialized channel state for the provided

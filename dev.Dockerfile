@@ -4,7 +4,7 @@
 # /make/builder.Dockerfile
 # /.github/workflows/main.yml
 # /.github/workflows/release.yml
-FROM golang:1.20.3-alpine as builder
+FROM golang:1.21.0-alpine as builder
 
 LABEL maintainer="Olaoluwa Osuntokun <laolu@lightning.engineering>"
 
@@ -15,7 +15,7 @@ ENV GODEBUG netdns=cgo
 # Install dependencies.
 RUN apk add --no-cache --update alpine-sdk \
     git \
-    make 
+    make
 
 # Copy in the local repository to build from.
 COPY . /go/src/github.com/lightningnetwork/lnd

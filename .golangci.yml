@@ -53,7 +53,7 @@ linters-settings:
       - G306 # Poor file permissions used when writing to a new file.
 
   staticcheck:
-    go: "1.18"
+    go: "1.20"
     checks: ["-SA1019"]
 
   lll:
@@ -98,6 +98,13 @@ linters-settings:
       - 'math.*'
       - 'strconv.ParseInt'
       - 'errors.Wrap'
+  
+  gomoddirectives:
+    replace-allow-list:
+      # See go.mod for the explanation why these are needed.
+      - github.com/ulikunitz/xz
+      - github.com/gogo/protobuf
+      - google.golang.org/protobuf
 
 
 linters:
@@ -206,6 +213,18 @@ issues:
       linters:
         - gosec
         - funlen
+        - revive
+        # Allow duplications in tests so it's easier to follow a single unit
+        # test.
+        - dupl
+
+    - path: mock*
+      linters:
+        - revive
+        # forcetypeassert is skipped for the mock because the test would fail
+        # if the returned value doesn't match the type, so there's no need to
+        # check the convert.
+        - forcetypeassert
 
     - path: test*
       linters:
