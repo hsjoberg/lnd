@@ -3,26 +3,28 @@ module github.com/lightningnetwork/lnd
 require (
 	github.com/NebulousLabs/go-upnp v0.0.0-20180202185039-29b680b06c82
 	github.com/Yawning/aez v0.0.0-20211027044916-e49e68abd344
-	github.com/andybalholm/brotli v1.0.4
-	github.com/btcsuite/btcd v0.24.2
+	github.com/andybalholm/brotli v1.1.0
+	github.com/breez/breez v0.0.0-00010101000000-000000000000
+	github.com/btcsuite/btcd v0.24.2-beta.rc1.0.20240403021926-ae5533602c46
 	github.com/btcsuite/btcd/btcec/v2 v2.3.3
 	github.com/btcsuite/btcd/btcutil v1.1.5
 	github.com/btcsuite/btcd/btcutil/psbt v1.1.8
 	github.com/btcsuite/btcd/chaincfg/chainhash v1.1.0
 	github.com/btcsuite/btclog v0.0.0-20170628155309-84c8d2346e9f
-	github.com/btcsuite/btcwallet v0.16.10-0.20240706055350-e391a1c31df2
+	github.com/btcsuite/btcwallet v0.16.10-0.20240404104514-b2f31f9045fb
 	github.com/btcsuite/btcwallet/wallet/txauthor v1.3.4
 	github.com/btcsuite/btcwallet/wallet/txrules v1.2.1
 	github.com/btcsuite/btcwallet/walletdb v1.4.2
 	github.com/btcsuite/btcwallet/wtxmgr v1.5.3
-	github.com/coreos/go-systemd v0.0.0-20190719114852-fd7a80b32e1f
+	github.com/coreos/go-systemd v0.0.0-20191104093116-d3cd4ed1dbcf
 	github.com/davecgh/go-spew v1.1.1
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.3.0
+	github.com/gabstv/go-bsdiff v1.0.5
 	github.com/go-errors/errors v1.0.1
 	github.com/gorilla/websocket v1.5.0
 	github.com/grpc-ecosystem/go-grpc-middleware v1.3.0
 	github.com/grpc-ecosystem/go-grpc-prometheus v1.2.0
-	github.com/grpc-ecosystem/grpc-gateway/v2 v2.5.0
+	github.com/grpc-ecosystem/grpc-gateway/v2 v2.11.3
 	github.com/jackc/pgx/v4 v4.18.2
 	github.com/jackpal/gateway v1.0.5
 	github.com/jackpal/go-nat-pmp v0.0.0-20170405195558-28a68d0c24ad
@@ -49,12 +51,13 @@ require (
 	github.com/stretchr/testify v1.9.0
 	github.com/tv42/zbase32 v0.0.0-20160707012821-501572607d02
 	github.com/urfave/cli v1.22.9
+	go.etcd.io/bbolt v1.3.7
 	go.etcd.io/etcd/client/pkg/v3 v3.5.7
 	go.etcd.io/etcd/client/v3 v3.5.7
 	golang.org/x/crypto v0.22.0
 	golang.org/x/exp v0.0.0-20240325151524-a685a6edb6d8
 	golang.org/x/mobile v0.0.0-20190719004257-d2bd2a29d028
-	golang.org/x/net v0.24.0
+	golang.org/x/net v0.22.0
 	golang.org/x/sync v0.6.0
 	golang.org/x/term v0.19.0
 	golang.org/x/time v0.3.0
@@ -88,6 +91,7 @@ require (
 	github.com/docker/docker v24.0.7+incompatible // indirect
 	github.com/docker/go-connections v0.4.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
+	github.com/dsnet/compress v0.0.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fergusstrange/embedded-postgres v1.25.0 // indirect
 	github.com/fsnotify/fsnotify v1.5.4 // indirect
@@ -116,7 +120,6 @@ require (
 	github.com/jonboulle/clockwork v0.2.2 // indirect
 	github.com/json-iterator/go v1.1.11 // indirect
 	github.com/juju/loggo v0.0.0-20210728185423-eebad3a902c4 // indirect
-	github.com/juju/testing v0.0.0-20220203020004-a0ff61f03494 // indirect
 	github.com/lib/pq v1.10.9 // indirect
 	github.com/lightninglabs/gozmq v0.0.0-20191113021534-d20a764486bf // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
@@ -155,7 +158,6 @@ require (
 	github.com/xi2/xz v0.0.0-20171230120015-48954b6210f8 // indirect
 	github.com/xiang90/probing v0.0.0-20190116061207-43a291ad63a2 // indirect
 	gitlab.com/yawning/bsaes.git v0.0.0-20190805113838-0a714cd429ec // indirect
-	go.etcd.io/bbolt v1.3.7 // indirect
 	go.etcd.io/etcd/api/v3 v3.5.7 // indirect
 	go.etcd.io/etcd/client/v2 v2.305.7 // indirect
 	go.etcd.io/etcd/pkg/v3 v3.5.7 // indirect
@@ -167,7 +169,7 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.0.1 // indirect
 	go.opentelemetry.io/otel/sdk v1.0.1 // indirect
 	go.opentelemetry.io/otel/trace v1.0.1 // indirect
-	go.opentelemetry.io/proto/otlp v0.9.0 // indirect
+	go.opentelemetry.io/proto/otlp v0.15.0 // indirect
 	go.uber.org/atomic v1.7.0 // indirect
 	go.uber.org/multierr v1.6.0 // indirect
 	go.uber.org/zap v1.17.0 // indirect
@@ -202,7 +204,15 @@ replace github.com/gogo/protobuf => github.com/gogo/protobuf v1.3.2
 // We want to format raw bytes as hex instead of base64. The forked version
 // allows us to specify that as an option.
 replace google.golang.org/protobuf => github.com/lightninglabs/protobuf-go-hex-display v1.30.0-hex-display
+
+// Blixt overrides
 replace github.com/lightningnetwork/lnd/tor => ./tor
+
+replace github.com/breez/breez => github.com/djkazic/breez v0.0.8
+
+replace github.com/btcsuite/btcwallet => github.com/djkazic/btcwallet v1.7.2
+
+replace github.com/btcsuite/btcwallet/walletdb => github.com/djkazic/btcwallet/walletdb v1.7.2
 
 // If you change this please also update .github/pull_request_template.md and
 // docs/INSTALL.md.
