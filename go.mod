@@ -21,6 +21,7 @@ require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.3.0
 	github.com/gabstv/go-bsdiff v1.0.5
 	github.com/go-errors/errors v1.0.1
+	github.com/golang/protobuf v1.5.3
 	github.com/gorilla/websocket v1.5.0
 	github.com/grpc-ecosystem/go-grpc-middleware v1.3.0
 	github.com/grpc-ecosystem/go-grpc-prometheus v1.2.0
@@ -98,7 +99,6 @@ require (
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang-jwt/jwt/v4 v4.4.2 // indirect
 	github.com/golang-migrate/migrate/v4 v4.17.0 // indirect
-	github.com/golang/protobuf v1.5.3 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/google/btree v1.0.1 // indirect
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
@@ -213,6 +213,8 @@ replace github.com/breez/breez => github.com/djkazic/breez v0.0.8
 replace github.com/btcsuite/btcwallet => github.com/djkazic/btcwallet v1.7.2
 
 replace github.com/btcsuite/btcwallet/walletdb => github.com/djkazic/btcwallet/walletdb v1.7.2
+
+replace github.com/lightninglabs/neutrino => github.com/djkazic/neutrino v0.16.1-1
 
 // If you change this please also update .github/pull_request_template.md and
 // docs/INSTALL.md.
