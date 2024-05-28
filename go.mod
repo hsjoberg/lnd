@@ -214,7 +214,7 @@ replace github.com/btcsuite/btcwallet => github.com/djkazic/btcwallet v1.7.2
 
 replace github.com/btcsuite/btcwallet/walletdb => github.com/djkazic/btcwallet/walletdb v1.7.2
 
-replace github.com/lightninglabs/neutrino => github.com/djkazic/neutrino v0.16.1-2
+replace github.com/lightninglabs/neutrino => github.com/djkazic/neutrino v0.16.1-3
 
 // If you change this please also update .github/pull_request_template.md and
 // docs/INSTALL.md.
