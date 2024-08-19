@@ -1,4 +1,4 @@
-package lndmobile
+package main
 
 import (
 	"bufio"
