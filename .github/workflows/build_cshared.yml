@@ -40,15 +40,17 @@ jobs:
           go mod download
           go mod verify
 
-      - name: Build mobile RPC
-        run: |
-          # Add required header to the generated file
-          mkdir -p mobile
-          echo '#include <stdint.h>' > mobile/cgo_utils_generated.go.tmp
-          cat mobile/cgo_utils_generated.go >> mobile/cgo_utils_generated.go.tmp
-          mv mobile/cgo_utils_generated.go.tmp mobile/cgo_utils_generated.go
+      - name: Generate mobile RPC
+        run: make mobile-rpc
 
-          make mobile-rpc
+      - name: Add required header and build CGO
+        run: |
+          # Create temporary file with header
+          echo '#include <stdint.h>' > temp_header
+          # Prepend header to the generated file
+          cat temp_header mobile/cgo_utils_generated.go > mobile/cgo_utils_generated.go.new
+          mv mobile/cgo_utils_generated.go.new mobile/cgo_utils_generated.go
+          # Run CGO build
           make cgo
 
       - name: Archive mobile build
