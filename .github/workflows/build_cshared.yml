@@ -43,10 +43,10 @@ jobs:
       - name: Build mobile RPC
         run: |
           # Add required header to the generated file
-          # mkdir -p mobile
-          # echo '#include <stdint.h>' > mobile/cgo_utils_generated.go.tmp
-          # cat mobile/cgo_utils_generated.go >> mobile/cgo_utils_generated.go.tmp
-          # mv mobile/cgo_utils_generated.go.tmp mobile/cgo_utils_generated.go
+          mkdir -p mobile
+          echo '#include <stdint.h>' > mobile/cgo_utils_generated.go.tmp
+          cat mobile/cgo_utils_generated.go >> mobile/cgo_utils_generated.go.tmp
+          mv mobile/cgo_utils_generated.go.tmp mobile/cgo_utils_generated.go
 
           make mobile-rpc
           make cgo
