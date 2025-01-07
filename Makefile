@@ -420,6 +420,11 @@ cgo: mobile-cgo-mode
 	@$(call print, "Building c-archived .a libs ($(CGO_BUILD_DIR)).")
 	CGO_ENABLED=1 $(GOBUILD) -buildmode=c-shared -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -v -o "$(CGO_BUILD_DIR)/" $(MOBILE_PKG)
 
+#? cgo: Build CGO .dll lib for windows
+windows-cgo: mobile-rpc mobile-cgo-mode
+	@$(call print, "Building c-shared .dll lib ($(CGO_BUILD_DIR)).")
+	CGO_ENABLED=1 $(GOBUILD) -buildmode=c-shared -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -v -o "$(CGO_BUILD_DIR)/windows/liblnd.dll" $(MOBILE_PKG)
+
 #? ios-cgo: Switch mobile directory mode to CGO mode
 mobile-cgo-mode:
 	@echo "Changing package name from 'lndmobile' to 'main' in all Go files under ./mobile"
