@@ -28,4 +28,9 @@ func start(extraArgs *C.char, callback C.CCallback) {
 	Start(C.GoString(extraArgs), WrapCallbackCgo(callback))
 }
 
+//export getStatus
+func getStatus() int32 {
+	return lndStarted
+}
+
 func main() {}
