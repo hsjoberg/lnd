@@ -81,7 +81,7 @@ jobs:
           
       - name: Upload iOS build artifact
         if: github.event.inputs.platform == 'ios' || github.event.inputs.platform == 'both' || github.event_name != 'workflow_dispatch'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ios-cgo-build
           path: ios-cgo-build.zip
@@ -100,7 +100,7 @@ jobs:
           
       - name: Upload Android build artifact
         if: github.event.inputs.platform == 'android' || github.event.inputs.platform == 'both' || github.event_name != 'workflow_dispatch'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: android-cgo-build
           path: android-cgo-build.zip
