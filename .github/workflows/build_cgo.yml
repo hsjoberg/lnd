@@ -47,14 +47,6 @@ jobs:
       - name: Generate mobile RPC
         run: make mobile-rpc
         
-      - name: Add required header to generated file
-        run: |
-          # Create temporary file with header
-          echo '#include <stdint.h>' > temp_header
-          # Prepend header to the generated file
-          cat temp_header mobile/cgo_utils_generated.go > mobile/cgo_utils_generated.go.new
-          mv mobile/cgo_utils_generated.go.new mobile/cgo_utils_generated.go
-
       # Setup Android NDK for Android build
       - name: Set up Android NDK
         if: github.event.inputs.platform == 'android' || github.event.inputs.platform == 'both' || github.event_name != 'workflow_dispatch'
