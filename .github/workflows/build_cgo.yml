@@ -31,7 +31,9 @@ jobs:
       
       # Set up Docker on macOS using Colima
       - name: Setup Docker on macOS
-        uses: douglascamata/setup-docker-macos-action@v1-alpha.16
+        uses: douglascamata/setup-docker-macos-action@v1-alpha
+        with:
+          colima-additional-options: "--mount-type 9p"
             
       - name: Install build dependencies
         run: |
@@ -44,6 +46,12 @@ jobs:
           go mod download
           go mod verify
           
+      # Create required build directories locally before running Docker commands
+      - name: Create build directories
+        run: |
+          mkdir -p mobile/build/cgo/ios
+          mkdir -p mobile/build/cgo/android
+
       - name: Generate mobile RPC
         run: make mobile-rpc
         
@@ -65,6 +73,13 @@ jobs:
         run: |
           # Make sure clangwrap.sh is executable
           chmod +x mobile/clangwrap.sh
+          
+          # Set GOPATH to the current working directory
+          export GOPATH=$PWD
+          
+          # Create src directory and link the project
+          mkdir -p src/github.com/lightningnetwork
+          ln -sf $PWD src/github.com/lightningnetwork/lnd
           
           # Run the iOS CGO build
           make ios-cgo
@@ -96,7 +111,16 @@ jobs:
       # Build for Android
       - name: Build Android CGO
         if: github.event.inputs.platform == 'android' || github.event.inputs.platform == 'both' || github.event_name != 'workflow_dispatch'
-        run: make android-cgo
+        run: |
+          # Set GOPATH to the current working directory
+          export GOPATH=$PWD
+          
+          # Create src directory and link the project (if not already done in iOS step)
+          mkdir -p src/github.com/lightningnetwork
+          ln -sf $PWD src/github.com/lightningnetwork/lnd
+          
+          # Run the Android CGO build
+          make android-cgo
         
       - name: Archive Android build
         if: github.event.inputs.platform == 'android' || github.event.inputs.platform == 'both' || github.event_name != 'workflow_dispatch'
