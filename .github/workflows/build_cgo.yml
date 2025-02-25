@@ -31,7 +31,7 @@ jobs:
       
       # Set up Docker on macOS using Colima
       - name: Setup Docker on macOS
-        uses: douglascamata/setup-docker-macos-action@v1-alpha
+        uses: douglascamata/setup-docker-macos-action@v1-alpha.16
             
       - name: Install build dependencies
         run: |
