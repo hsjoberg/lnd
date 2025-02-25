@@ -17,9 +17,8 @@ on:
           - both
 
 jobs:
-  # First job: Generate mobile RPC on Ubuntu
-  generate-mobile-rpc:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: macos-13 # Using macOS-13 runner for Docker compatibility
     steps:
       - uses: actions/checkout@v4
         with:
@@ -30,19 +29,15 @@ jobs:
         with:
           go-version: "1.21"
       
-      - name: Set up Docker
-        uses: docker/setup-buildx-action@v3
-      
+      # Set up Docker on macOS using Colima
+      - name: Setup Docker on macOS
+        uses: douglascamata/setup-docker-macos-action@v1-alpha
+            
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            gcc \
-            libc6-dev \
+          brew install \
             pkg-config \
-            cmake \
-            make
+            cmake
             
       - name: Install Go dependencies
         run: |
@@ -59,47 +54,6 @@ jobs:
           # Prepend header to the generated file
           cat temp_header mobile/cgo_utils_generated.go > mobile/cgo_utils_generated.go.new
           mv mobile/cgo_utils_generated.go.new mobile/cgo_utils_generated.go
-      
-      # Upload the entire repository with generated files
-      - name: Upload repository with generated files
-        uses: actions/upload-artifact@v4
-        with:
-          name: repo-with-mobile-rpc
-          path: .
-          retention-days: 1
-  
-  # Second job: Build for iOS and/or Android on macOS
-  build:
-    needs: generate-mobile-rpc
-    runs-on: macos-latest
-    steps:
-      # Download the repository with generated RPC files
-      - name: Download repository with generated files
-        uses: actions/download-artifact@v4
-        with:
-          name: repo-with-mobile-rpc
-          path: .
-      
-      # Restore file permissions
-      - name: Restore file permissions
-        run: |
-          chmod -R +x .
-          
-      - name: Set up Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: "1.21"
-      
-      - name: Install macOS build dependencies
-        run: |
-          brew install \
-            pkg-config \
-            cmake
-            
-      - name: Install Go dependencies
-        run: |
-          go mod download
-          go mod verify
 
       # Setup Android NDK for Android build
       - name: Set up Android NDK
@@ -131,7 +85,7 @@ jobs:
             zip -r ../../../../ios-cgo-build.zip .
           else
             echo "iOS build directory not found, checking alternative paths..."
-            find mobile/build -type d
+            find mobile/build -type d || echo "mobile/build not found"
             echo "Creating empty archive as a fallback"
             mkdir -p empty-ios
             cd empty-ios
@@ -160,7 +114,7 @@ jobs:
             zip -r ../../../../android-cgo-build.zip .
           else
             echo "Android build directory not found, checking alternative paths..."
-            find mobile/build -type d
+            find mobile/build -type d || echo "mobile/build not found"
             echo "Creating empty archive as a fallback"
             mkdir -p empty-android
             cd empty-android
