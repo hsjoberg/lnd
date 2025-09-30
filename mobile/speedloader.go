@@ -19,11 +19,12 @@ import (
 
 	"github.com/andybalholm/brotli"
 	"github.com/breez/breez/refcount"
-	"github.com/btcsuite/btcwallet/walletdb"
 	"github.com/btcsuite/btcwallet/walletdb/bdb"
 	"github.com/gabstv/go-bsdiff/pkg/bspatch"
 	"github.com/lightningnetwork/lnd/channeldb"
-	"github.com/lightningnetwork/lnd/channeldb/models"
+	graphdb "github.com/lightningnetwork/lnd/graph/db"
+	"github.com/lightningnetwork/lnd/graph/db/models"
+	"github.com/lightningnetwork/lnd/kvdb"
 	"go.etcd.io/bbolt"
 )
 
@@ -89,10 +90,25 @@ func createService(workingDir string, log *Logger) (*channeldb.DB, error) {
 	var err error
 	graphDir := path.Join(workingDir, strings.Replace(directoryPattern, "{{network}}", "mainnet", -1))
 	log.Println("creating shared channeldb service.")
-	chanDB, err := channeldb.Open(graphDir,
-		channeldb.OptionSetSyncFreelist(true))
+
+	// Create kvdb backend
+	backend, err := kvdb.GetBoltBackend(&kvdb.BoltBackendConfig{
+		DBPath:         graphDir,
+		DBFileName:     "channel.db",
+		NoFreelistSync: false, // This is the opposite of OptionSetSyncFreelist(true)
+		DBTimeout:      kvdb.DefaultDBTimeout,
+		ReadOnly:       false,
+	})
 	if err != nil {
-		log.Printf("unable to open channeldb: %v", err)
+		log.Printf("unable to create kvdb backend: %v", err)
+		return nil, err
+	}
+
+	// Create channeldb with the backend
+	chanDB, err := channeldb.CreateWithBackend(backend)
+	if err != nil {
+		log.Printf("unable to create channeldb: %v", err)
+		backend.Close()
 		return nil, err
 	}
 
@@ -212,21 +228,29 @@ type walkFunc func(keys [][]byte, k, v []byte, seq uint64) error
 
 type skipFunc func(keys [][]byte, k, v []byte) bool
 
-func ourNode(chanDB *channeldb.DB) (*channeldb.LightningNode, error) {
-	graph := chanDB.ChannelGraph()
+func ourNode(chanDB *channeldb.DB) (*models.LightningNode, error) {
+	// Create a ChannelGraph instance using the same backend
+	graph, err := graphdb.NewChannelGraph(&graphdb.Config{
+		KVDB: chanDB.Backend,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer graph.Stop()
+
 	node, err := graph.SourceNode()
-	if err == channeldb.ErrSourceNodeNotSet || err == channeldb.ErrGraphNotFound {
+	if err == graphdb.ErrSourceNodeNotSet || err == graphdb.ErrGraphNotFound {
 		return nil, nil
 	}
 	return node, err
 }
 
-func ourData(chanDB *channeldb.DB, ourNode *channeldb.LightningNode, log *Logger) (
-	[]*channeldb.LightningNode, []*models.ChannelEdgeInfo, []*models.ChannelEdgePolicy, error) {
-	nodeMap := make(map[string]*channeldb.LightningNode)
+func ourData(chanDB *channeldb.DB, ourNode *models.LightningNode, log *Logger) (
+	[]*models.LightningNode, []*models.ChannelEdgeInfo, []*models.ChannelEdgePolicy, error) {
+	nodeMap := make(map[string]*models.LightningNode)
 	var edges []*models.ChannelEdgeInfo
 	var policies []*models.ChannelEdgePolicy
-	var nodes []*channeldb.LightningNode
+	var nodes []*models.LightningNode
 
 	select {
 	case <-globalCtx.Done():
@@ -234,8 +258,16 @@ func ourData(chanDB *channeldb.DB, ourNode *channeldb.LightningNode, log *Logger
 		log.Println("Cancelling ourData")
 		return nodes, edges, policies, globalCtx.Err()
 	default:
-		graph := chanDB.ChannelGraph()
-		err := graph.ForEachNodeChannel(ourNode.PubKeyBytes, func(tx walletdb.ReadTx,
+		// Create a ChannelGraph instance using the same backend
+		graph, err := graphdb.NewChannelGraph(&graphdb.Config{
+			KVDB: chanDB.Backend,
+		})
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		defer graph.Stop()
+
+		err = graph.ForEachNodeChannel(ourNode.PubKeyBytes, func(
 			channelEdgeInfo *models.ChannelEdgeInfo,
 			toPolicy *models.ChannelEdgePolicy,
 			fromPolicy *models.ChannelEdgePolicy) error {
@@ -243,7 +275,7 @@ func ourData(chanDB *channeldb.DB, ourNode *channeldb.LightningNode, log *Logger
 			if toPolicy == nil || fromPolicy == nil {
 				return nil
 			}
-			nodeMap[hex.EncodeToString(toPolicy.ToNode[:])] = &channeldb.LightningNode{
+			nodeMap[hex.EncodeToString(toPolicy.ToNode[:])] = &models.LightningNode{
 				PubKeyBytes: toPolicy.ToNode,
 			}
 			edges = append(edges, channelEdgeInfo)
@@ -266,7 +298,7 @@ func ourData(chanDB *channeldb.DB, ourNode *channeldb.LightningNode, log *Logger
 	}
 }
 
-func putOurData(chanDB *channeldb.DB, node *channeldb.LightningNode, nodes []*channeldb.LightningNode,
+func putOurData(chanDB *channeldb.DB, node *models.LightningNode, nodes []*models.LightningNode,
 	edges []*models.ChannelEdgeInfo, policies []*models.ChannelEdgePolicy, log *Logger) error {
 
 	select {
@@ -275,8 +307,16 @@ func putOurData(chanDB *channeldb.DB, node *channeldb.LightningNode, nodes []*ch
 		log.Println("Cancelling putOurData")
 		return globalCtx.Err()
 	default:
-		graph := chanDB.ChannelGraph()
-		err := graph.SetSourceNode(node)
+		// Create a ChannelGraph instance using the same backend
+		graph, err := graphdb.NewChannelGraph(&graphdb.Config{
+			KVDB: chanDB.Backend,
+		})
+		if err != nil {
+			return err
+		}
+		defer graph.Stop()
+
+		err = graph.SetSourceNode(node)
 		if err != nil {
 			return fmt.Errorf("graph.SetSourceNode(%x): %w", node.PubKeyBytes, err)
 		}
@@ -288,7 +328,7 @@ func putOurData(chanDB *channeldb.DB, node *channeldb.LightningNode, nodes []*ch
 		}
 		for _, edge := range edges {
 			err = graph.AddChannelEdge(edge)
-			if err != nil && err != channeldb.ErrEdgeAlreadyExist {
+			if err != nil && err != graphdb.ErrEdgeAlreadyExist {
 				return fmt.Errorf("graph.AddChannelEdge(%x): %w", edge.ChannelID, err)
 			}
 		}
@@ -746,7 +786,19 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 		// temporarily copy dgraph to usage dir
 		err = copyFile(dgraphPath, usagePath, log)
 		// open dgraph.db as source
-		dchanDB, err := channeldb.Open(cacheDir + "/usage")
+		usageBackend, err := kvdb.GetBoltBackend(&kvdb.BoltBackendConfig{
+			DBPath:         cacheDir + "/usage",
+			DBFileName:     "channel.db",
+			NoFreelistSync: false,
+			DBTimeout:      kvdb.DefaultDBTimeout,
+			ReadOnly:       false,
+		})
+		if err != nil {
+			callback.OnError(err)
+			return
+		}
+
+		dchanDB, err := channeldb.CreateWithBackend(usageBackend)
 		defer os.Remove(usagePath)
 		defer dchanDB.Close()
 		if err != nil {
