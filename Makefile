@@ -31,6 +31,7 @@ ANDROID_EXTLDFLAGS := -extldflags '-Wl,-z,max-page-size=$(ANDROID_MAX_PAGE_SIZE)
 CGO_BUILD_DIR := $(MOBILE_BUILD_DIR)/cgo
 CGO_ANDROID_BUILD_DIR := $(CGO_BUILD_DIR)/android
 ANDROID_CLANG_FINDER = $(PWD)/mobile/ndk-clang-finder.sh
+CGO_LINUX_BUILD_DIR := $(CGO_BUILD_DIR)/linux
 CGO_IOS_BUILD_DIR := $(CGO_BUILD_DIR)/ios
 CGO_MACOS_BUILD_DIR := $(CGO_BUILD_DIR)/macos
 
@@ -521,10 +522,17 @@ cgo: mobile-cgo-mode
 	@$(call print, "Building c-archived .a libs ($(CGO_BUILD_DIR)).")
 	CGO_ENABLED=1 $(GOBUILD) -buildmode=c-shared -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -v -o "$(CGO_BUILD_DIR)/" $(MOBILE_PKG)
 
+#? linux-cgo: Build CGO .so lib for Linux x86_64
+linux-cgo: mobile-rpc mobile-cgo-mode
+	@$(call print, "Building c-shared .so lib ($(CGO_LINUX_BUILD_DIR)).")
+	mkdir -p $(CGO_LINUX_BUILD_DIR)
+	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 $(GOBUILD) -buildmode=c-shared -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -v -o "$(CGO_LINUX_BUILD_DIR)/liblnd.so" $(MOBILE_PKG)
+	cp "$(CGO_LINUX_BUILD_DIR)/liblnd.h" "$(CGO_LINUX_BUILD_DIR)/liblnd-linux.h"
+
 #? cgo: Build CGO .dll lib for windows
 windows-cgo: mobile-rpc mobile-cgo-mode
 	@$(call print, "Building c-shared .dll lib ($(CGO_BUILD_DIR)).")
-	CGO_ENABLED=1 $(GOBUILD) -buildmode=c-shared -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -v -o "$(CGO_BUILD_DIR)/windows/liblnd.dll" $(MOBILE_PKG)
+	CGO_ENABLED=1 GOOS=windows $(GOBUILD) -buildmode=c-shared -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -v -o "$(CGO_BUILD_DIR)/windows/liblnd.dll" $(MOBILE_PKG)
 
 #? ios-cgo: Switch mobile directory mode to CGO mode
 mobile-cgo-mode:

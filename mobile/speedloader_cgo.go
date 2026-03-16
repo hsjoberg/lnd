@@ -5,6 +5,7 @@ package main
 #define CALLBACK_DEFS_H
 
 #include <stdlib.h>
+#include <stdint.h>
 
 typedef void (*ResponseFunc)(void* context, const char* data, int length);
 typedef void (*ErrorFunc)(void* context, const char* error);
@@ -12,8 +13,8 @@ typedef void (*ErrorFunc)(void* context, const char* error);
 typedef struct CCallback {
     ResponseFunc onResponse;
     ErrorFunc onError;
-    void* responseContext;
-    void* errorContext;
+    uintptr_t responseContext;
+    uintptr_t errorContext;
 } CCallback;
 
 #endif // CALLBACK_DEFS_H
