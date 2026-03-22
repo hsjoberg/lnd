@@ -17,7 +17,7 @@ GO_BIN := ${GOPATH}/bin
 BTCD_BIN := $(GO_BIN)/btcd
 GOMOBILE_BIN := $(GO_BIN)/gomobile
 
-MOBILE_BUILD_DIR :=${GOPATH}/src/$(MOBILE_PKG)/build
+MOBILE_BUILD_DIR := $(CURDIR)/mobile/build
 IOS_BUILD_DIR := $(MOBILE_BUILD_DIR)/ios
 IOS_BUILD := $(IOS_BUILD_DIR)/Lndmobile.xcframework
 
@@ -45,6 +45,8 @@ ACTIVE_GO_VERSION_MINOR := $(shell echo $(ACTIVE_GO_VERSION) | cut -d. -f2)
 # GitHub Actions. This is the reference version for the project. All other Go
 # versions are checked against this version.
 GO_VERSION = 1.26.3
+MOBILE_RPC_MODE ?= docker
+WINDOWS_CGO_CC ?=
 
 GOBUILD := $(GOCC) build -v
 GOINSTALL := $(GOCC) install -v
@@ -358,7 +360,7 @@ fuzz:
 #? fmt: Format source code and fix imports
 fmt:
 	@$(call print, "Fixing imports.")
-	$(GOTOOL) $(GOIMPORTS_PKG) -w $(GOFILES_NOVENDOR) 
+	$(GOTOOL) $(GOIMPORTS_PKG) -w $(GOFILES_NOVENDOR)
 	@$(call print, "Formatting source.")
 	gofmt -l -w -s $(GOFILES_NOVENDOR)
 
@@ -476,8 +478,39 @@ sample-conf-check:
 
 #? mobile-rpc: Compile mobile RPC stubs from the protobuf definitions
 mobile-rpc:
+ifeq ($(MOBILE_RPC_MODE),local)
+	@$(MAKE) mobile-rpc-local
+else ifeq ($(MOBILE_RPC_MODE),docker)
+	@$(MAKE) mobile-rpc-docker
+else
+	$(error Unsupported MOBILE_RPC_MODE '$(MOBILE_RPC_MODE)'; use 'docker' or 'local')
+endif
+
+#? mobile-rpc-docker: Compile mobile RPC stubs from the protobuf definitions inside docker
+mobile-rpc-docker:
 	@$(call print, "Creating mobile RPC from protos.")
-	cd ./lnrpc; COMPILE_MOBILE=1 SUBSERVER_PREFIX=1 ./gen_protos_docker.sh
+	COMPILE_MOBILE=1 SUBSERVER_PREFIX=1 ./lnrpc/gen_protos_docker.sh
+
+#? install-mobile-rpc-tools: Install the local Go-based tools required for mobile RPC generation
+install-mobile-rpc-tools:
+	@$(call print, "Installing local mobile RPC generation tools.")
+	cd ./lnrpc; bash ./install_gen_tools.sh
+
+#? check-mobile-rpc-tools: Verify the local mobile RPC generation tools are available
+check-mobile-rpc-tools:
+	@command -v protoc >/dev/null 2>&1 || (echo "protoc not found in PATH"; exit 1)
+	@command -v clang-format >/dev/null 2>&1 || (echo "clang-format not found in PATH"; exit 1)
+	@command -v protoc-gen-go >/dev/null 2>&1 || (echo "protoc-gen-go not found in PATH"; exit 1)
+	@command -v protoc-gen-go-grpc >/dev/null 2>&1 || (echo "protoc-gen-go-grpc not found in PATH"; exit 1)
+	@command -v protoc-gen-grpc-gateway >/dev/null 2>&1 || (echo "protoc-gen-grpc-gateway not found in PATH"; exit 1)
+	@command -v protoc-gen-openapiv2 >/dev/null 2>&1 || (echo "protoc-gen-openapiv2 not found in PATH"; exit 1)
+	@command -v falafel >/dev/null 2>&1 || (echo "falafel not found in PATH"; exit 1)
+	@command -v goimports >/dev/null 2>&1 || (echo "goimports not found in PATH"; exit 1)
+
+#? mobile-rpc-local: Compile mobile RPC stubs from the protobuf definitions using locally installed tools
+mobile-rpc-local: check-mobile-rpc-tools
+	@$(call print, "Creating mobile RPC from protos without docker.")
+	eval "$$(bash ./lnrpc/read_tool_versions.sh)"; COMPILE_MOBILE=1 SUBSERVER_PREFIX=1 FALAFEL_VERSION="$$FALAFEL_VERSION" ./lnrpc/gen_protos.sh
 
 #? vendor: Create a vendor directory with all dependencies
 vendor:
@@ -517,6 +550,15 @@ macos-cgo: mobile-rpc mobile-cgo-mode
 	lipo $(CGO_MACOS_BUILD_DIR)/liblnd-arm64.a $(CGO_MACOS_BUILD_DIR)/liblnd-amd64.a -create -output $(CGO_MACOS_BUILD_DIR)/liblnd-fat.a
 	cp $(CGO_MACOS_BUILD_DIR)/liblnd-arm64.h $(CGO_MACOS_BUILD_DIR)/liblnd.h
 
+#? macos-cgo-shared: Build CGO .dylib lib for macOS
+macos-cgo-shared: mobile-rpc mobile-cgo-mode
+	@$(call print, "Building c-shared .dylib libs ($(CGO_MACOS_BUILD_DIR)).")
+	mkdir -p $(CGO_MACOS_BUILD_DIR)
+	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 $(GOBUILD) -buildmode=c-shared -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -v -o $(CGO_MACOS_BUILD_DIR)/liblnd-arm64.dylib $(MOBILE_PKG)
+	CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 $(GOBUILD) -buildmode=c-shared -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -v -o $(CGO_MACOS_BUILD_DIR)/liblnd-amd64.dylib $(MOBILE_PKG)
+	lipo $(CGO_MACOS_BUILD_DIR)/liblnd-arm64.dylib $(CGO_MACOS_BUILD_DIR)/liblnd-amd64.dylib -create -output $(CGO_MACOS_BUILD_DIR)/liblnd.dylib
+	cp $(CGO_MACOS_BUILD_DIR)/liblnd-arm64.h $(CGO_MACOS_BUILD_DIR)/liblnd.h
+
 #? cgo: Build CGO lib for the host platform
 cgo: mobile-cgo-mode
 	@$(call print, "Building c-archived .a libs ($(CGO_BUILD_DIR)).")
@@ -532,7 +574,7 @@ linux-cgo: mobile-rpc mobile-cgo-mode
 #? cgo: Build CGO .dll lib for windows
 windows-cgo: mobile-rpc mobile-cgo-mode
 	@$(call print, "Building c-shared .dll lib ($(CGO_BUILD_DIR)).")
-	CGO_ENABLED=1 GOOS=windows $(GOBUILD) -buildmode=c-shared -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -v -o "$(CGO_BUILD_DIR)/windows/liblnd.dll" $(MOBILE_PKG)
+	CGO_ENABLED=1 GOOS=windows GOARCH=amd64 $(if $(WINDOWS_CGO_CC),CC="$(WINDOWS_CGO_CC)") $(GOBUILD) -buildmode=c-shared -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -v -o "$(CGO_BUILD_DIR)/windows/liblnd.dll" $(MOBILE_PKG)
 
 #? ios-cgo: Switch mobile directory mode to CGO mode
 mobile-cgo-mode:
