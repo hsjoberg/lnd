@@ -489,7 +489,7 @@ endif
 #? mobile-rpc-docker: Compile mobile RPC stubs from the protobuf definitions inside docker
 mobile-rpc-docker:
 	@$(call print, "Creating mobile RPC from protos.")
-	COMPILE_MOBILE=1 SUBSERVER_PREFIX=1 ./lnrpc/gen_protos_docker.sh
+	cd ./lnrpc; COMPILE_MOBILE=1 SUBSERVER_PREFIX=1 ./gen_protos_docker.sh
 
 #? install-mobile-rpc-tools: Install the local Go-based tools required for mobile RPC generation
 install-mobile-rpc-tools:

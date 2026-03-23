@@ -21,6 +21,25 @@ import (
 // attempted to be started at once.
 var lndStarted int32
 
+func sanitizeLaunchArgs(args []string) []string {
+	filtered := make([]string, 0, len(args))
+
+	for i := 0; i < len(args); i++ {
+		// Xcode debug launches can inject this document revisions flag,
+		// which lnd does not understand.
+		if args[i] == "-NSDocumentRevisionsDebugMode" {
+			if i+1 < len(args) {
+				i++
+			}
+			continue
+		}
+
+		filtered = append(filtered, args[i])
+	}
+
+	return filtered
+}
+
 // Start starts lnd in a new goroutine.
 //
 // extraArgs can be used to pass command line arguments to lnd that will
@@ -65,7 +84,7 @@ func Start(extraArgs string, rpcReady Callback) {
 
 	// Add the extra arguments to os.Args, as that will be parsed in
 	// LoadConfig below.
-	os.Args = append(os.Args, splitArgs...)
+	os.Args = append(sanitizeLaunchArgs(os.Args), splitArgs...)
 
 	// Hook interceptor for os signals.
 	shutdownInterceptor, err := signal.Intercept()
