@@ -66,6 +66,9 @@ require (
 	pgregory.net/rapid v1.2.0
 )
 
+replace github.com/jessevdk/go-flags => ./third_party/go-flags
+replace go.etcd.io/bbolt => github.com/hsjoberg/bbolt-wasm v1.4.3-wasm.1
+
 require (
 	dario.cat/mergo v1.0.1 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20230124172434-306776ec8161 // indirect
@@ -224,6 +227,8 @@ go 1.24.11
 
 // Temporary replace until the next version of sqldb is taged.
 replace github.com/lightningnetwork/lnd/sqldb => ./sqldb
+
+replace github.com/lightningnetwork/lnd/kvdb => ./kvdb
 
 // Blixt overrides
 replace github.com/lightningnetwork/lnd/tor => ./tor

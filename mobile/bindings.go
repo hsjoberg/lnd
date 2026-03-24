@@ -1,13 +1,14 @@
 //go:build mobile
 // +build mobile
 
-package main
+package lndmobile
 
 import (
 	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	flags "github.com/jessevdk/go-flags"
@@ -20,6 +21,23 @@ import (
 // lndStarted will be used atomically to ensure only a single lnd instance is
 // attempted to be started at once.
 var lndStarted int32
+
+var (
+	startConfigHookMtx sync.RWMutex
+	startConfigHook    func(*lnd.Config) error
+)
+
+// SetStartConfigHook configures an optional post-LoadConfig mutator.
+//
+// We use this as the single extension point for non-native embeddings such as
+// wasm: the normal mobile path still gets the full lnd.LoadConfig behavior,
+// then the embedding can patch only the runtime-only fields that cannot be
+// expressed cleanly through CLI args alone.
+func SetStartConfigHook(hook func(*lnd.Config) error) {
+	startConfigHookMtx.Lock()
+	startConfigHook = hook
+	startConfigHookMtx.Unlock()
+}
 
 func sanitizeLaunchArgs(args []string) []string {
 	filtered := make([]string, 0, len(args))
@@ -103,6 +121,21 @@ func Start(extraArgs string, rpcReady Callback) {
 		_, _ = fmt.Fprintln(os.Stderr, err)
 		rpcReady.OnError(err)
 		return
+	}
+
+	startConfigHookMtx.RLock()
+	hook := startConfigHook
+	startConfigHookMtx.RUnlock()
+	if hook != nil {
+		// Apply any embedding-specific runtime overrides after LoadConfig so the
+		// embedding can reuse the normal startup path instead of reimplementing
+		// config assembly.
+		if err := hook(loadedConfig); err != nil {
+			atomic.StoreInt32(&lndStarted, 0)
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			rpcReady.OnError(err)
+			return
+		}
 	}
 
 	// Set a channel that will be notified when the RPC server is ready to

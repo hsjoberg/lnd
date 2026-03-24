@@ -139,8 +139,15 @@ func (s *subRPCServerConfigs) PopulateDependencies(cfg *Config,
 	numFields := selfVal.NumField()
 	for i := 0; i < numFields; i++ {
 		field := selfVal.Field(i)
-		fieldElem := field.Elem()
 		fieldName := selfType.Field(i).Name
+
+		if field.IsNil() {
+			ltndLog.Debugf("Skipping nil sub RPC server config: %v",
+				fieldName)
+			continue
+		}
+
+		fieldElem := field.Elem()
 
 		ltndLog.Debugf("Populating dependencies for sub RPC "+
 			"server: %v", fieldName)
@@ -401,6 +408,9 @@ func (s *subRPCServerConfigs) FetchConfig(subServerName string) (interface{}, bo
 	// not, then we'll return false for the ok value to indicate to the
 	// caller that this field doesn't actually exist.
 	if !configVal.IsValid() {
+		return nil, false
+	}
+	if configVal.Kind() == reflect.Ptr && configVal.IsNil() {
 		return nil, false
 	}
 

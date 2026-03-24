@@ -318,6 +318,7 @@ type Config struct {
 	TLSDisableAutofill bool          `long:"tlsdisableautofill" description:"Do not include the interface IPs or the system hostname in TLS certificate, use first --tlsextradomain as Common Name instead, if set"`
 	TLSCertDuration    time.Duration `long:"tlscertduration" description:"The duration for which the auto-generated TLS certificate will be valid for"`
 	TLSEncryptKey      bool          `long:"tlsencryptkey" description:"Automatically encrypts the TLS private key and generates ephemeral TLS key pairs when the wallet is locked or not initialized"`
+	SkipTLSForEmbedded bool          `long:"-" description:"Skip TLS setup when lnd is embedded behind an in-memory RPC transport."`
 
 	NoMacaroons     bool          `long:"no-macaroons" description:"Disable macaroon authentication, can only be used if server is not listening on a public interface."`
 	AdminMacPath    string        `long:"adminmacaroonpath" description:"Path to write the admin macaroon for lnd's RPC and REST services if it doesn't exist"`
@@ -930,7 +931,7 @@ func ValidateConfig(cfg Config, interceptor signal.Interceptor, fileParser,
 		return fmt.Errorf(funcName+": "+format, args...)
 	}
 	makeDirectory := func(dir string) error {
-		err := os.MkdirAll(dir, 0700)
+		err := mkdirAllCompat(dir, 0700)
 		if err != nil {
 			// Show a nicer error message if it's because a symlink
 			// is linked to a directory that does not exist

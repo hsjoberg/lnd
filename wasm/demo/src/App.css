@@ -1,0 +1,184 @@
+.app-shell {
+    width: min(1380px, 100%);
+    margin: 0 auto;
+    padding: 28px 18px 40px;
+}
+
+.hero-panel {
+    padding: 28px;
+    border: 1px solid rgba(25, 53, 57, 0.18);
+    border-radius: 28px;
+    background:
+        radial-gradient(
+            circle at top right,
+            rgba(191, 96, 36, 0.18),
+            transparent 24rem
+        ),
+        linear-gradient(
+            160deg,
+            rgba(250, 247, 239, 0.98),
+            rgba(244, 236, 223, 0.96)
+        );
+    box-shadow: 0 20px 50px rgba(39, 31, 18, 0.08);
+}
+
+.hero-panel h1 {
+    margin: 0;
+    max-width: 14ch;
+}
+
+.runtime-pill {
+    display: inline-flex;
+    margin-top: 18px;
+    padding: 8px 14px;
+    border-radius: 999px;
+    border: 1px solid rgba(34, 85, 91, 0.18);
+    background: rgba(34, 85, 91, 0.09);
+    color: #1f585a;
+    font-size: 0.9rem;
+}
+
+.app-grid {
+    display: grid;
+    gap: 16px;
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    margin-top: 18px;
+}
+
+.panel {
+    padding: 18px;
+    border: 1px solid rgba(32, 46, 50, 0.12);
+    border-radius: 22px;
+    background: rgba(255, 252, 245, 0.86);
+    box-shadow: 0 12px 30px rgba(40, 31, 20, 0.05);
+}
+
+.top-row {
+    grid-column: 1 / -1;
+    display: grid;
+    gap: 16px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.panel h2 {
+    margin: 0 0 12px;
+    font-size: 1.08rem;
+}
+
+.panel-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.panel-note {
+    color: #7c6c59;
+    font-size: 0.84rem;
+}
+
+label {
+    display: block;
+    margin: 12px 0 6px;
+    color: #72624e;
+    font-size: 0.88rem;
+}
+
+input,
+textarea,
+select,
+button {
+    width: 100%;
+    font: inherit;
+}
+
+input,
+textarea,
+select {
+    border: 1px solid rgba(103, 80, 57, 0.2);
+    border-radius: 14px;
+    padding: 11px 13px;
+    background: rgba(255, 255, 255, 0.88);
+    color: #1d1b18;
+}
+
+textarea {
+    min-height: 140px;
+    resize: vertical;
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 0.9rem;
+    line-height: 1.45;
+}
+
+button {
+    border: 0;
+    border-radius: 999px;
+    padding: 11px 14px;
+    background: #b85c38;
+    color: #fff8f4;
+    cursor: pointer;
+    transition:
+        transform 140ms ease,
+        filter 140ms ease;
+}
+
+button.alt {
+    background: #23585b;
+}
+
+button:hover {
+    transform: translateY(-1px);
+    filter: brightness(1.03);
+}
+
+.button-grid {
+    display: grid;
+    gap: 10px;
+    grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+    margin-top: 14px;
+}
+
+.scrollbox {
+    max-height: 420px;
+    margin: 0;
+    overflow: auto;
+    padding: 12px 14px;
+    border: 1px solid rgba(102, 80, 56, 0.16);
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.7);
+    color: #1a1815;
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 0.87rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.log-scrollbox {
+    max-height: 520px;
+}
+
+.result-scrollbox {
+    max-height: 520px;
+}
+
+@media (max-width: 780px) {
+    .app-shell {
+        padding-inline: 12px;
+    }
+
+    .hero-panel,
+    .panel {
+        padding: 16px;
+        border-radius: 20px;
+    }
+
+    .button-grid {
+        grid-template-columns: 1fr 1fr;
+    }
+
+    .top-row {
+        grid-template-columns: 1fr;
+    }
+}

@@ -1627,7 +1627,7 @@ func initNeutrinoBackend(ctx context.Context, cfg *Config, chainDir string,
 	)
 
 	// Ensure that the neutrino db path exists.
-	if err := os.MkdirAll(dbPath, 0700); err != nil {
+	if err := mkdirAllCompat(dbPath, 0700); err != nil {
 		return nil, nil, err
 	}
 
@@ -1663,10 +1663,16 @@ func initNeutrinoBackend(ctx context.Context, cfg *Config, chainDir string,
 
 	default:
 		dbName := filepath.Join(dbPath, lncfg.NeutrinoDBName)
-		db, err = walletdb.Create(
+		db, err = walletdb.Open(
 			kvdb.BoltBackendName, dbName, !cfg.SyncFreelist,
 			cfg.DB.Bolt.DBTimeout, false,
 		)
+		if errors.Is(err, walletdb.ErrDbDoesNotExist) {
+			db, err = walletdb.Create(
+				kvdb.BoltBackendName, dbName, !cfg.SyncFreelist,
+				cfg.DB.Bolt.DBTimeout, false,
+			)
+		}
 	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("unable to create "+

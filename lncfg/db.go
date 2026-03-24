@@ -689,6 +689,29 @@ func (db *DB) GetBackends(ctx context.Context, chanDBPath,
 	}
 	closeFuncs[NSDecayedLogDB] = decayedLogBackend.Close
 
+	var walletLoader btcwallet.LoaderOption
+	if useExternalWalletDBForLocalBackend() {
+		walletBackend, err := kvdb.GetBoltBackend(&kvdb.BoltBackendConfig{
+			DBPath:            walletDBPath,
+			DBFileName:        WalletDBName,
+			DBTimeout:         db.Bolt.DBTimeout,
+			NoFreelistSync:    db.Bolt.NoFreelistSync,
+			AutoCompact:       db.Bolt.AutoCompact,
+			AutoCompactMinAge: db.Bolt.AutoCompactMinAge,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("error opening wallet DB: %w", err)
+		}
+		closeFuncs[NSWalletDB] = walletBackend.Close
+		walletLoader = btcwallet.LoaderWithExternalWalletDB(
+			walletBackend,
+		)
+	} else {
+		walletLoader = btcwallet.LoaderWithLocalWalletDB(
+			walletDBPath, db.Bolt.NoFreelistSync, db.Bolt.DBTimeout,
+		)
+	}
+
 	// The tower client is optional and might not be enabled by the user. We
 	// handle it being nil properly in the main server.
 	var towerClientBackend kvdb.Backend
@@ -741,15 +764,8 @@ func (db *DB) GetBackends(ctx context.Context, chanDBPath,
 		DecayedLogDB:  decayedLogBackend,
 		TowerClientDB: towerClientBackend,
 		TowerServerDB: towerServerBackend,
-		// When "running locally", LND will use the bbolt wallet.db to
-		// store the wallet located in the chain data dir, parametrized
-		// by the active network. The wallet loader has its own cleanup
-		// method so we don't need to add anything to our map (in fact
-		// nothing is opened just yet).
-		WalletDB: btcwallet.LoaderWithLocalWalletDB(
-			walletDBPath, db.Bolt.NoFreelistSync, db.Bolt.DBTimeout,
-		),
-		CloseFuncs: closeFuncs,
+		WalletDB:      walletLoader,
+		CloseFuncs:    closeFuncs,
 	}, nil
 }
 

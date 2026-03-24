@@ -251,7 +251,7 @@ func migrateCloseChanSummaries(tx kvdb.RwTx) error {
 	closedChanBucket := tx.ReadWriteBucket(closedChannelBucket)
 
 	// Exit early if bucket is not found.
-	if closedChannelBucket == nil {
+	if closedChanBucket == nil {
 		return nil
 	}
 
