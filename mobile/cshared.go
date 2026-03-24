@@ -1,14 +1,13 @@
-//go:build mobile
-// +build mobile
+//go:build mobile && cgo && !js
+// +build mobile,cgo,!js
 
-package main
+package lndmobile
 
 /*
 #ifndef CALLBACK_DEFS_H
 #define CALLBACK_DEFS_H
 
 #include <stdlib.h>
-#include <stdint.h>
 
 typedef void (*ResponseFunc)(void* context, const char* data, int length);
 typedef void (*ErrorFunc)(void* context, const char* error);

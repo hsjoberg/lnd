@@ -79,14 +79,20 @@ const (
 func AdminAuthOptions(cfg *Config, skipMacaroons bool) ([]grpc.DialOption,
 	error) {
 
-	creds, err := credentials.NewClientTLSFromFile(cfg.TLSCertPath, "")
-	if err != nil {
-		return nil, fmt.Errorf("unable to read TLS cert: %w", err)
-	}
-
 	// Create a dial options array.
-	opts := []grpc.DialOption{
-		grpc.WithTransportCredentials(creds),
+	opts := make([]grpc.DialOption, 0, 2)
+
+	if cfg.SkipTLSForEmbedded {
+		opts = append(opts, embeddedAdminTransportDialOption())
+	} else {
+		creds, err := credentials.NewClientTLSFromFile(
+			cfg.TLSCertPath, "",
+		)
+		if err != nil {
+			return nil, fmt.Errorf("unable to read TLS cert: %w", err)
+		}
+
+		opts = append(opts, grpc.WithTransportCredentials(creds))
 	}
 
 	// Get the admin macaroon if macaroons are active.
@@ -297,32 +303,53 @@ func Main(cfg *Config, lisCfg ListenerCfg, implCfg *ImplementationCfg,
 		return mkErr("error initializing DBs", err)
 	}
 
-	tlsManagerCfg := &TLSManagerCfg{
-		TLSCertPath:        cfg.TLSCertPath,
-		TLSKeyPath:         cfg.TLSKeyPath,
-		TLSEncryptKey:      cfg.TLSEncryptKey,
-		TLSExtraIPs:        cfg.TLSExtraIPs,
-		TLSExtraDomains:    cfg.TLSExtraDomains,
-		TLSAutoRefresh:     cfg.TLSAutoRefresh,
-		TLSDisableAutofill: cfg.TLSDisableAutofill,
-		TLSCertDuration:    cfg.TLSCertDuration,
+	var (
+		serverOpts   []grpc.ServerOption
+		restDialOpts []grpc.DialOption
+		restListen   func(net.Addr) (net.Listener, error)
+		tlsManager   *TLSManager
+	)
 
-		LetsEncryptDir:    cfg.LetsEncryptDir,
-		LetsEncryptDomain: cfg.LetsEncryptDomain,
-		LetsEncryptListen: cfg.LetsEncryptListen,
+	if cfg.SkipTLSForEmbedded {
+		// The embedded admin path stays in-process, so it uses insecure gRPC
+		// credentials instead of the normal TLS manager flow. We still seed
+		// REST dial opts here because startRestProxy is reached unconditionally
+		// in the current lnd startup path, even when the caller disables REST.
+		restDialOpts = []grpc.DialOption{
+			embeddedAdminTransportDialOption(),
+		}
+		restListen = embeddedRestListener
+	} else {
+		tlsManagerCfg := &TLSManagerCfg{
+			TLSCertPath:        cfg.TLSCertPath,
+			TLSKeyPath:         cfg.TLSKeyPath,
+			TLSEncryptKey:      cfg.TLSEncryptKey,
+			TLSExtraIPs:        cfg.TLSExtraIPs,
+			TLSExtraDomains:    cfg.TLSExtraDomains,
+			TLSAutoRefresh:     cfg.TLSAutoRefresh,
+			TLSDisableAutofill: cfg.TLSDisableAutofill,
+			TLSCertDuration:    cfg.TLSCertDuration,
 
-		DisableRestTLS: cfg.DisableRestTLS,
+			LetsEncryptDir:    cfg.LetsEncryptDir,
+			LetsEncryptDomain: cfg.LetsEncryptDomain,
+			LetsEncryptListen: cfg.LetsEncryptListen,
 
-		HTTPHeaderTimeout: cfg.HTTPHeaderTimeout,
-	}
-	tlsManager := NewTLSManager(tlsManagerCfg)
-	serverOpts, restDialOpts, restListen, cleanUp,
-		err := tlsManager.SetCertificateBeforeUnlock()
-	if err != nil {
-		return mkErr("error setting cert before unlock", err)
-	}
-	if cleanUp != nil {
-		defer cleanUp()
+			DisableRestTLS: cfg.DisableRestTLS,
+
+			HTTPHeaderTimeout: cfg.HTTPHeaderTimeout,
+		}
+
+		tlsManager = NewTLSManager(tlsManagerCfg)
+
+		var cleanUp func()
+		serverOpts, restDialOpts, restListen, cleanUp,
+			err = tlsManager.SetCertificateBeforeUnlock()
+		if err != nil {
+			return mkErr("error setting cert before unlock", err)
+		}
+		if cleanUp != nil {
+			defer cleanUp()
+		}
 	}
 
 	// If we have chosen to start with a dedicated listener for the
@@ -666,9 +693,11 @@ func Main(cfg *Config, lisCfg ListenerCfg, implCfg *ImplementationCfg,
 	}
 	defer atplManager.Stop()
 
-	err = tlsManager.LoadPermanentCertificate(activeChainControl.KeyRing)
-	if err != nil {
-		return mkErr("unable to load permanent TLS certificate", err)
+	if tlsManager != nil {
+		err = tlsManager.LoadPermanentCertificate(activeChainControl.KeyRing)
+		if err != nil {
+			return mkErr("unable to load permanent TLS certificate", err)
+		}
 	}
 
 	// Now we have created all dependencies necessary to populate and

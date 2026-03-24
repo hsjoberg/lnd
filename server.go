@@ -1955,32 +1955,34 @@ func (s *server) createLivenessMonitor(cfg *Config, cc *chainreg.ChainControl,
 		cfg.HealthChecks.DiskCheck.Attempts,
 	)
 
-	tlsHealthCheck := healthcheck.NewObservation(
-		"tls",
-		func() error {
-			expired, expTime, err := s.tlsManager.IsCertExpired(
-				s.cc.KeyRing,
-			)
-			if err != nil {
-				return err
-			}
-			if expired {
-				return fmt.Errorf("TLS certificate is "+
-					"expired as of %v", expTime)
-			}
-
-			// If the certificate is not outdated, no error needs
-			// to be returned
-			return nil
-		},
-		cfg.HealthChecks.TLSCheck.Interval,
-		cfg.HealthChecks.TLSCheck.Timeout,
-		cfg.HealthChecks.TLSCheck.Backoff,
-		cfg.HealthChecks.TLSCheck.Attempts,
-	)
-
 	checks := []*healthcheck.Observation{
-		chainHealthCheck, diskCheck, tlsHealthCheck,
+		chainHealthCheck, diskCheck,
+	}
+
+	if s.tlsManager != nil {
+		tlsHealthCheck := healthcheck.NewObservation(
+			"tls",
+			func() error {
+				expired, expTime, err := s.tlsManager.IsCertExpired(
+					s.cc.KeyRing,
+				)
+				if err != nil {
+					return err
+				}
+				if expired {
+					return fmt.Errorf("TLS certificate is "+
+						"expired as of %v", expTime)
+				}
+
+				return nil
+			},
+			cfg.HealthChecks.TLSCheck.Interval,
+			cfg.HealthChecks.TLSCheck.Timeout,
+			cfg.HealthChecks.TLSCheck.Backoff,
+			cfg.HealthChecks.TLSCheck.Attempts,
+		)
+
+		checks = append(checks, tlsHealthCheck)
 	}
 
 	// If Tor is enabled, add the healthcheck for tor connection.

@@ -1,4 +1,4 @@
-package main
+package lndmobile
 
 /*
 #ifndef CALLBACK_DEFS_H

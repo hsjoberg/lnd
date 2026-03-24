@@ -85,3 +85,9 @@ coverage.txt
 
 # All test data generated from rapid.
 */testdata
+
+# wasm
+wasm/build
+wasm/backend/*_registry_generated.go
+wasm/demo/public/wasm/lndmobile.wasm
+wasm/demo/public/wasm/fs_backends.js

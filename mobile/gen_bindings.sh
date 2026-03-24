@@ -41,7 +41,7 @@ mem_rpc=1
 
 PROTOS="lightning.proto walletunlocker.proto stateservice.proto autopilotrpc/autopilot.proto chainrpc/chainnotifier.proto invoicesrpc/invoices.proto neutrinorpc/neutrino.proto peersrpc/peers.proto routerrpc/router.proto signrpc/signer.proto verrpc/verrpc.proto walletrpc/walletkit.proto watchtowerrpc/watchtower.proto wtclientrpc/wtclient.proto"
 
-opts="package_name=$pkg,target_package=$target_pkg,listeners=$listeners,mem_rpc=$mem_rpc,cgo=1"
+opts="package_name=$pkg,target_package=$target_pkg,listeners=$listeners,mem_rpc=$mem_rpc"
 
 for file in $PROTOS; do
   echo "Generating mobile protos from ${file}"
@@ -71,7 +71,7 @@ do
     build_tags="// +build $tag"
     lis="lightningLis"
 
-    opts="package_name=$pkg,target_package=$target_pkg/$tag,build_tags=$build_tags,api_prefix=$use_prefix,defaultlistener=$lis,cgo=1"
+    opts="package_name=$pkg,target_package=$target_pkg/$tag,build_tags=$build_tags,api_prefix=$use_prefix,defaultlistener=$lis"
 
     echo "Generating mobile protos from ${file}, with build tag ${tag}"
 

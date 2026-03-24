@@ -1,0 +1,55 @@
+:root {
+  color: #2a221a;
+  background:
+    radial-gradient(circle at top left, rgba(184, 92, 56, 0.14), transparent 24rem),
+    radial-gradient(circle at top right, rgba(35, 88, 91, 0.12), transparent 22rem),
+    linear-gradient(180deg, #f2ece0, #ece4d6);
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  line-height: 1.5;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+}
+
+h1,
+h2,
+p {
+  margin-block: 0;
+}
+
+code {
+  padding: 0.15rem 0.45rem;
+  border-radius: 8px;
+  background: rgba(25, 33, 36, 0.07);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.92em;
+}
+
+button,
+input,
+textarea,
+select {
+  outline: none;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  box-shadow: 0 0 0 3px rgba(34, 88, 91, 0.2);
+}
