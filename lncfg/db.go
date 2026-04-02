@@ -3,8 +3,10 @@ package lncfg
 import (
 	"context"
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/btcsuite/btclog/v2"
@@ -20,6 +22,7 @@ import (
 
 const (
 	ChannelDBName     = "channel.db"
+	GraphDBName       = "graph.db"
 	MacaroonDBName    = "macaroons.db"
 	DecayedLogDbName  = "sphinxreplay.db"
 	TowerClientDBName = "wtclient.db"
@@ -44,9 +47,13 @@ const (
 
 	defaultSqliteBusyTimeout = 5 * time.Second
 
-	// NSChannelDB is the namespace name that we use for the combined graph
-	// and channel state DB.
+	// NSChannelDB is the namespace name that we use for the KV-backed
+	// channel state DB. Some backends still store graph data in this same
+	// namespace.
 	NSChannelDB = "channeldb"
+
+	// NSGraphDB is the namespace name that we use for the graph DB.
+	NSGraphDB = "graphdb"
 
 	// NSMacaroonDB is the namespace name that we use for the macaroon DB.
 	NSMacaroonDB = "macaroondb"
@@ -105,6 +112,7 @@ func DefaultDB() *DB {
 		Backend:             BoltBackend,
 		BatchCommitInterval: DefaultBatchCommitInterval,
 		Bolt: &kvdb.BoltConfig{
+			GraphDBName:       ChannelDBName,
 			NoFreelistSync:    true,
 			AutoCompactMinAge: kvdb.DefaultBoltAutoCompactMinAge,
 			DBTimeout:         kvdb.DefaultDBTimeout,
@@ -142,6 +150,10 @@ func (db *DB) Validate() error {
 		if db.UseNativeSQL {
 			return fmt.Errorf("cannot use native SQL with bolt " +
 				"backend")
+		}
+
+		if err := validateBoltGraphDBName(db.Bolt.GraphDBName); err != nil {
+			return err
 		}
 
 	case SqliteBackend:
@@ -185,6 +197,42 @@ func (db *DB) Validate() error {
 	return nil
 }
 
+func validateBoltGraphDBName(name string) error {
+	if name == "" {
+		return nil
+	}
+
+	normalizedName := strings.ToLower(name)
+
+	if strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("db.bolt.graphdbname must be a file name, "+
+			"not a path: %q", name)
+	}
+
+	switch normalizedName {
+	case ".", "..":
+		return fmt.Errorf("db.bolt.graphdbname must be a file name, "+
+			"got %q", name)
+
+	case strings.ToLower(DecayedLogDbName),
+		strings.ToLower(TowerClientDBName):
+		return fmt.Errorf("db.bolt.graphdbname cannot reuse reserved "+
+			"bolt DB file %q", name)
+	}
+
+	return nil
+}
+
+func sameFilePath(a, b string) bool {
+	aInfo, aErr := os.Stat(a)
+	bInfo, bErr := os.Stat(b)
+	if aErr == nil && bErr == nil {
+		return os.SameFile(aInfo, bInfo)
+	}
+
+	return a == b
+}
+
 // Init should be called upon start to pre-initialize database access dependent
 // on configuration.
 func (db *DB) Init(ctx context.Context, dbPath string) error {
@@ -217,9 +265,7 @@ func (db *DB) Init(ctx context.Context, dbPath string) error {
 // backends for the daemon. The two backends we expose are the graph database
 // backend, and the channel state backend.
 type DatabaseBackends struct {
-	// GraphDB points to the database backend that contains the less
-	// critical data that is accessed often, such as the channel graph and
-	// chain height hints.
+	// GraphDB points to the database backend that contains graph data.
 	GraphDB kvdb.Backend
 
 	// ChanStateDB points to a possibly networked replicated backend that
@@ -310,15 +356,13 @@ func (db *DB) GetBackends(ctx context.Context, chanDBPath,
 
 	switch db.Backend {
 	case EtcdBackend:
-		// As long as the graph data, channel state and height hint
-		// cache are all still in the channel.db file in bolt, we
-		// replicate the same behavior here and use the same etcd
-		// backend for those three sub DBs. But we namespace it properly
-		// to make such a split even easier in the future. This will
-		// break lnd for users that ran on etcd with 0.13.x since that
-		// code used the root namespace. We assume that nobody used etcd
-		// for mainnet just yet since that feature was clearly marked as
-		// experimental in 0.13.x.
+		// We still use the same etcd namespace for the graph, channel
+		// state and height hint backends. But we namespace it properly
+		// to make a future split easier. This will break lnd for users
+		// that ran on etcd with 0.13.x since that code used the root
+		// namespace. We assume that nobody used etcd for mainnet just
+		// yet since that feature was clearly marked as experimental in
+		// 0.13.x.
 		etcdBackend, err := kvdb.Open(
 			kvdb.EtcdBackendName, ctx,
 			db.Etcd.CloneWithSubNamespace(NSChannelDB),
@@ -663,6 +707,40 @@ func (db *DB) GetBackends(ctx context.Context, chanDBPath,
 	}
 	closeFuncs[NSChannelDB] = boltBackend.Close
 
+	graphDBName := db.Bolt.GraphDBName
+	if graphDBName == "" {
+		graphDBName = ChannelDBName
+	}
+
+	graphBackend := boltBackend
+	channelDBPath, err := filepath.Abs(
+		filepath.Join(chanDBPath, ChannelDBName),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("error resolving channel DB path: %w", err)
+	}
+
+	graphDBPath, err := filepath.Abs(filepath.Join(chanDBPath, graphDBName))
+	if err != nil {
+		return nil, fmt.Errorf("error resolving graph DB path: %w", err)
+	}
+
+	if !sameFilePath(graphDBPath, channelDBPath) {
+		graphBackend, err = kvdb.GetBoltBackend(&kvdb.BoltBackendConfig{
+			DBPath:            chanDBPath,
+			DBFileName:        graphDBName,
+			DBTimeout:         db.Bolt.DBTimeout,
+			NoFreelistSync:    db.Bolt.NoFreelistSync,
+			AutoCompact:       db.Bolt.AutoCompact,
+			AutoCompactMinAge: db.Bolt.AutoCompactMinAge,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("error opening graph DB: %w", err)
+		}
+
+		closeFuncs[NSGraphDB] = graphBackend.Close
+	}
+
 	macaroonBackend, err := kvdb.GetBoltBackend(&kvdb.BoltBackendConfig{
 		DBPath:            walletDBPath,
 		DBFileName:        MacaroonDBName,
@@ -734,7 +812,7 @@ func (db *DB) GetBackends(ctx context.Context, chanDBPath,
 	returnEarly = false
 
 	return &DatabaseBackends{
-		GraphDB:       boltBackend,
+		GraphDB:       graphBackend,
 		ChanStateDB:   boltBackend,
 		HeightHintDB:  boltBackend,
 		MacaroonDB:    macaroonBackend,
