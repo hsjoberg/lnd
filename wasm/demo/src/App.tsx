@@ -1,5 +1,7 @@
+// (globalThis as any).__lndWasmMirrorStdoutToConsole = true;
+// (globalThis as any).__lndWasmDisableOPFSSyncAccess = true;
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   AddInvoiceResponseSchema,
   ChannelAcceptRequestSchema,
@@ -86,10 +88,51 @@ type ResultValue = string | Record<string, unknown>;
 const DEFAULT_EXTRA_ARGS =
   '--lnddir="/lnd" --bitcoin.node=neutrino --bitcoin.testnet --norest --no-rest-tls --nolisten --nobootstrap --no-macaroons --tlsdisableautofill --rpclisten=127.0.0.1:10009 --restlisten=127.0.0.1:8080 --tor.socks=127.0.0.1:9050 --tor.control=127.0.0.1:9051 --debuglevel="info"';
 
+const DEFAULT_LND_CONF = `bitcoin.node=neutrino
+bitcoin.testnet=1
+norest=1
+no-rest-tls=1
+nolisten=1
+nobootstrap=1
+no-macaroons=1
+tlsdisableautofill=1
+rpclisten=127.0.0.1:10009
+restlisten=127.0.0.1:8080
+tor.socks=127.0.0.1:9050
+tor.control=127.0.0.1:9051
+debuglevel=info
+`;
+
 const encoder = new TextEncoder();
 
 function encodeBytes(value: string) {
   return encoder.encode(value);
+}
+
+async function writeTextFileToOPFS(path: string, contents: string) {
+  if (
+    !navigator.storage ||
+    typeof navigator.storage.getDirectory !== "function"
+  ) {
+    throw new Error("OPFS is not available in this browser/context");
+  }
+
+  const parts = path.split("/").filter(Boolean);
+  if (parts.length === 0) {
+    throw new Error("path must point to a file");
+  }
+
+  let directory = await navigator.storage.getDirectory();
+  for (const part of parts.slice(0, -1)) {
+    directory = await directory.getDirectoryHandle(part, { create: true });
+  }
+
+  const fileHandle = await directory.getFileHandle(parts[parts.length - 1], {
+    create: true,
+  });
+  const writable = await fileHandle.createWritable();
+  await writable.write(contents);
+  await writable.close();
 }
 
 function parseSeedWords(seedWords: string) {
@@ -214,6 +257,7 @@ function App() {
   const [fsBackend, setFsBackend] = useState<FsBackend>("opfs");
   const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("worker");
   const [extraArgs, setExtraArgs] = useState(DEFAULT_EXTRA_ARGS);
+  const [lndConf, setLndConf] = useState(DEFAULT_LND_CONF);
   const [seedPassphrase, setSeedPassphrase] = useState("");
   const [walletPassword, setWalletPassword] = useState("password123");
   const [seedWords, setSeedWords] = useState("");
@@ -240,21 +284,71 @@ function App() {
   const channelAcceptorHandleRef = useRef<ReturnType<
     typeof openBidiStream
   > | null>(null);
+  const logBufferRef = useRef<string[]>([]);
+  const logFlushTimerRef = useRef<number | null>(null);
+  const logScrollboxRef = useRef<HTMLPreElement | null>(null);
+  const shouldAutoScrollLogsRef = useRef(true);
+
+  function updateLogAutoScrollState() {
+    const element = logScrollboxRef.current;
+    if (!element) {
+      return;
+    }
+
+    const bottomGap =
+      element.scrollHeight - element.clientHeight - element.scrollTop;
+    shouldAutoScrollLogsRef.current = bottomGap <= 24;
+  }
+
+  function flushQueuedLogs() {
+    if (logFlushTimerRef.current != null) {
+      window.clearTimeout(logFlushTimerRef.current);
+      logFlushTimerRef.current = null;
+    }
+
+    if (logBufferRef.current.length === 0) {
+      return;
+    }
+
+    const pending = logBufferRef.current;
+    logBufferRef.current = [];
+    setLogLines((current) => [...current, ...pending].slice(-500));
+  }
+
+  function queueLogLine(message: string) {
+    logBufferRef.current.push(message);
+    if (logFlushTimerRef.current == null) {
+      logFlushTimerRef.current = window.setTimeout(flushQueuedLogs, 50);
+    }
+  }
 
   function appendLog(message: string) {
-    setLogLines((current) => {
-      return [...current, message].slice(-500);
-    });
+    queueLogLine(message);
   }
 
   useEffect(() => {
-    return attachStdoutListener(
-      (line) => {
-        setLogLines((current) => [...current, line].slice(-500));
-      },
-      runtimeMode,
-    );
+    return attachStdoutListener((line) => {
+      queueLogLine(line);
+    }, runtimeMode);
   }, [runtimeMode]);
+
+  useEffect(() => {
+    return () => {
+      flushQueuedLogs();
+      if (logFlushTimerRef.current != null) {
+        window.clearTimeout(logFlushTimerRef.current);
+      }
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    const element = logScrollboxRef.current;
+    if (!element || !shouldAutoScrollLogsRef.current) {
+      return;
+    }
+
+    element.scrollTop = element.scrollHeight;
+  }, [logLines]);
 
   function showResult(label: string, value: ResultValue) {
     setLastResult(`${label}\n${stringifyResult(value)}`);
@@ -315,6 +409,32 @@ function App() {
     setRuntimeStatus(`wasm loaded (${runtimeMode})`);
     appendLog(`fs backing: ${status.mode}`);
     appendLog(`wasm runtime loaded (${runtimeMode})`);
+    return { ok: true };
+  }
+
+  async function writeLndConfig() {
+    if (fsBackend !== "opfs") {
+      throw new Error(
+        "writing lnd.conf from the example currently requires OPFS",
+      );
+    }
+
+    await writeTextFileToOPFS("/lnd/lnd.conf", lndConf);
+    appendLog("wrote /lnd/lnd.conf");
+    return {
+      path: "/lnd/lnd.conf",
+      bytes: encoder.encode(lndConf).length,
+      backend: fsBackend,
+    };
+  }
+
+  async function startLnd() {
+    if (fsBackend === "opfs") {
+      await writeLndConfig();
+    }
+
+    await startWasm(extraArgs);
+    setRuntimeStatus(`started (${runtimeMode})`);
     return { ok: true };
   }
 
@@ -626,6 +746,9 @@ function App() {
   async function autoStartAndWallet() {
     if (!getWasmStatus()) {
       appendLog("starting lnd");
+      if (fsBackend === "opfs") {
+        await writeLndConfig();
+      }
       await startWasm(appendMissingFlags(extraArgs, ["--noseedbackup"]));
     } else {
       appendLog("lnd already started");
@@ -633,172 +756,208 @@ function App() {
   }
 
   async function benchmarkGetInfo(iterations = 100) {
+    return benchmarkUnary("get_info", iterations, getInfo);
+  }
+
+  async function benchmarkGetNetworkInfo(iterations = 100) {
+    return benchmarkUnary("get_network_info", iterations, getNetworkInfo);
+  }
+
+  async function benchmarkListChannels(iterations = 100) {
+    return benchmarkUnary("list_channels", iterations, listChannels);
+  }
+
+  async function benchmarkUnary<TResponse>(
+    label: string,
+    iterations: number,
+    action: () => Promise<TResponse>,
+  ) {
     const startedAt = performance.now();
-    let lastInfo: GetInfoResponse | null = null;
+    let lastResult: TResponse | null = null;
 
     for (let index = 0; index < iterations; index++) {
-      lastInfo = await getInfo();
+      lastResult = await action();
     }
 
     const elapsedMs = performance.now() - startedAt;
-    showResult(`get_info x ${iterations}`, {
+    showResult(`${label} x ${iterations}`, {
       elapsed_ms: Number(elapsedMs.toFixed(1)),
       elapsed: formatDurationMs(elapsedMs),
       iterations,
       avg_ms: Number((elapsedMs / iterations).toFixed(2)),
-      last_result: lastInfo ?? {},
+      last_result: lastResult ?? {},
     });
   }
 
   return (
     <main className="app-shell">
       <section className="hero-panel">
-        <h1>lnd wasm</h1>
-        <span className="runtime-pill">{runtimeStatus}</span>
+        <div className="hero-row">
+          <h1>lnd wasm</h1>
+          <span className="runtime-pill">{runtimeStatus}</span>
+        </div>
       </section>
 
       <div className="app-grid">
-        <div className="top-row">
-          <section className="panel">
-            <h2>Runtime</h2>
-            <label htmlFor="fsBackend">FS backend</label>
-            <select
-              id="fsBackend"
-              value={fsBackend}
-              onChange={(event) =>
-                setFsBackend(event.target.value as FsBackend)
-              }
-            >
-              <option value="opfs">opfs</option>
-              <option value="memory">memory</option>
-            </select>
+        <section className="panel runtime-panel">
+          <h2>Runtime</h2>
 
-            <label htmlFor="runtimeMode">Runtime mode</label>
-            <select
-              id="runtimeMode"
-              value={runtimeMode}
-              onChange={(event) =>
-                setRuntimeMode(event.target.value as RuntimeMode)
-              }
-            >
-              <option value="worker">Web Worker</option>
-              <option value="direct">Main thread</option>
-            </select>
+          <div className="runtime-columns">
+            <div className="runtime-section">
+              <label htmlFor="fsBackend">FS backend</label>
+              <select
+                id="fsBackend"
+                value={fsBackend}
+                onChange={(event) =>
+                  setFsBackend(event.target.value as FsBackend)
+                }
+              >
+                <option value="opfs">opfs</option>
+                <option value="memory">memory</option>
+              </select>
 
-            <label htmlFor="extraArgs">Start extraArgs</label>
-            <textarea
-              id="extraArgs"
-              value={extraArgs}
-              onChange={(event) => setExtraArgs(event.target.value)}
-            />
+              <label htmlFor="runtimeMode">Runtime mode</label>
+              <select
+                id="runtimeMode"
+                value={runtimeMode}
+                onChange={(event) =>
+                  setRuntimeMode(event.target.value as RuntimeMode)
+                }
+              >
+                <option value="worker">Web Worker</option>
+                <option value="direct">Main thread</option>
+              </select>
 
-            <div className="button-grid">
-              <button onClick={() => void runAction("load wasm", loadRuntime)}>
-                Load wasm
-              </button>
-              <button
-                className="alt"
-                onClick={() =>
-                  void runAction("start", async () => {
-                    await startWasm(extraArgs);
-                    setRuntimeStatus(`started (${runtimeMode})`);
-                    return { ok: true };
-                  })
-                }
-              >
-                Start
-              </button>
-              <button
-                onClick={() =>
-                  void runAction("auto_start_wallet", async () => {
-                    await autoStartAndWallet();
-                    return { ok: true };
-                  })
-                }
-              >
-                Start + auto wallet
-              </button>
-              <button
-                className="alt"
-                onClick={() =>
-                  void runAction("status", async () => ({
-                    lnd_started: getWasmStatus(),
-                  }))
-                }
-              >
-                Get status
-              </button>
-              <button
-                onClick={() =>
-                  void runAction("get_state", async () => {
-                    const response = await getState();
-                    return {
-                      ...response,
-                      state_name: stateName(response.state),
-                    };
-                  })
-                }
-              >
-                Get state
-              </button>
-              <button
-                className="alt"
-                onClick={() => void runAction("get_info", getInfo)}
-              >
-                Get info
-              </button>
-              <button
-                className="alt"
-                onClick={() =>
-                  void runAction("get_network_info", getNetworkInfo)
-                }
-              >
-                GetNetworkInfo
-              </button>
-              <button
-                className="alt"
-                onClick={() =>
-                  void runAction("neutrino_status", getNeutrinoStatus)
-                }
-              >
-                Neutrino Status
-              </button>
-              <button onClick={() => void benchmarkGetInfo(100)}>
-                GetInfo x 100
-              </button>
-              <button
-                className="alt"
-                onClick={() => void runAction("stop_daemon", stopDaemon)}
-              >
-                StopDaemon
-              </button>
-              <button
-                className="alt"
-                onClick={() => void runAction("list_channels", listChannels)}
-              >
-                ListChannels
-              </button>
+              <div className="button-grid">
+                <button
+                  disabled={runtimeStatus !== "not loaded"}
+                  onClick={() => void runAction("load wasm", loadRuntime)}
+                >
+                  Load wasm
+                </button>
+                <button onClick={() => void runAction("start", startLnd)}>
+                  Start
+                </button>
+                <button
+                  onClick={() =>
+                    void runAction("auto_start_wallet", async () => {
+                      await autoStartAndWallet();
+                      return { ok: true };
+                    })
+                  }
+                >
+                  Start + auto wallet
+                </button>
+                <button
+                  onClick={() =>
+                    void runAction("write_lnd_conf", writeLndConfig)
+                  }
+                >
+                  Write lnd.conf
+                </button>
+                <button
+                  onClick={() =>
+                    void runAction("status", async () => ({
+                      lnd_started: getWasmStatus(),
+                    }))
+                  }
+                >
+                  Get status
+                </button>
+                <button
+                  onClick={() =>
+                    void runAction("get_state", async () => {
+                      const response = await getState();
+                      return {
+                        ...response,
+                        state_name: stateName(response.state),
+                      };
+                    })
+                  }
+                >
+                  Get state
+                </button>
+                <button onClick={() => void runAction("get_info", getInfo)}>
+                  Get info
+                </button>
+                <button
+                  onClick={() =>
+                    void runAction("get_network_info", getNetworkInfo)
+                  }
+                >
+                  GetNetworkInfo
+                </button>
+                <button
+                  onClick={() =>
+                    void runAction("neutrino_status", getNeutrinoStatus)
+                  }
+                >
+                  Neutrino Status
+                </button>
+                <button onClick={() => void benchmarkGetInfo(100)}>
+                  GetInfo x 100
+                </button>
+                <button onClick={() => void benchmarkGetNetworkInfo(100)}>
+                  GetNetworkInfo x 100
+                </button>
+                <button onClick={() => void benchmarkListChannels(100)}>
+                  ListChannels x 100
+                </button>
+                <button
+                  onClick={() => void runAction("stop_daemon", stopDaemon)}
+                >
+                  StopDaemon
+                </button>
+                <button
+                  className="alt"
+                  onClick={() => void runAction("list_channels", listChannels)}
+                >
+                  ListChannels
+                </button>
+              </div>
             </div>
-          </section>
 
-          <section className="panel">
-            <div className="panel-heading">
-              <h2>Last Result</h2>
-              <span className="panel-note">
-                BigInts and bytes are normalized for display.
-              </span>
-            </div>
-            <pre className="scrollbox result-scrollbox">{lastResult}</pre>
-          </section>
+            <div className="runtime-section">
+              <label htmlFor="extraArgs">Start extraArgs</label>
+              <textarea
+                id="extraArgs"
+                value={extraArgs}
+                onChange={(event) => setExtraArgs(event.target.value)}
+              />
 
-          <section className="panel">
-            <div className="panel-heading">
-              <h2>Log</h2>
-              <span className="panel-note">{logLines.length} lines kept</span>
+              <label htmlFor="lndConf">/lnd/lnd.conf (OPFS)</label>
+              <textarea
+                id="lndConf"
+                value={lndConf}
+                onChange={(event) => setLndConf(event.target.value)}
+              />
             </div>
-            <pre className="scrollbox log-scrollbox">{logLines.join("\n")}</pre>
-          </section>
-        </div>
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-heading">
+            <h2>Last Result</h2>
+            <span className="panel-note">
+              BigInts and bytes are normalized for display.
+            </span>
+          </div>
+          <pre className="scrollbox result-scrollbox">{lastResult}</pre>
+        </section>
+
+        <section className="panel">
+          <div className="panel-heading">
+            <h2>Log</h2>
+            <span className="panel-note">{logLines.length} lines kept</span>
+          </div>
+          <pre
+            ref={logScrollboxRef}
+            className="scrollbox log-scrollbox"
+            onScroll={updateLogAutoScrollState}
+          >
+            {logLines.join("\n")}
+          </pre>
+        </section>
 
         <section className="panel">
           <h2>Wallet</h2>
@@ -840,10 +999,7 @@ function App() {
             >
               GenSeed
             </button>
-            <button
-              className="alt"
-              onClick={() => void runAction("init_wallet", initWallet)}
-            >
+            <button onClick={() => void runAction("init_wallet", initWallet)}>
               InitWallet
             </button>
             <button
@@ -897,7 +1053,6 @@ function App() {
               Start ChannelAcceptor
             </button>
             <button
-              className="alt"
               onClick={() =>
                 void runAction("channel_acceptor_stop", stopChannelAcceptor)
               }
@@ -940,7 +1095,6 @@ function App() {
               AddInvoice
             </button>
             <button
-              className="alt"
               onClick={() => void runAction("decode_pay_req", decodePayReq)}
             >
               DecodePayReq
@@ -953,7 +1107,6 @@ function App() {
               SendPaymentSync
             </button>
             <button
-              className="alt"
               onClick={() => void runAction("lookup_invoice", lookupInvoice)}
             >
               LookupInvoice
@@ -989,7 +1142,6 @@ function App() {
               OpenChannelSync
             </button>
             <button
-              className="alt"
               onClick={() => void runAction("list_channels", listChannels)}
             >
               ListChannels
@@ -1012,10 +1164,7 @@ function App() {
             <button onClick={() => void runAction("connect_peer", connectPeer)}>
               ConnectPeer
             </button>
-            <button
-              className="alt"
-              onClick={() => void runAction("list_peers", listPeers)}
-            >
+            <button onClick={() => void runAction("list_peers", listPeers)}>
               ListPeers
             </button>
           </div>

@@ -5,6 +5,7 @@ import type { FsBackend } from "./wasm-runtime-core";
 // between the two sides of the runtime split.
 export type RequestMessage =
   | { type: "load"; requestId: number; fsBackend: FsBackend }
+  | { type: "setConsoleMirroring"; requestId: number; enabled: boolean }
   | { type: "start"; requestId: number; extraArgs: string }
   | { type: "getStatus"; requestId: number }
   | {
@@ -39,4 +40,5 @@ export type ResponseMessage =
   | { type: "response"; requestId: number; success: false; error: string }
   | { type: "streamData"; streamId: number; responseBytes: Uint8Array }
   | { type: "streamError"; streamId: number; error: string }
+  | { type: "stdoutBatch"; lines: string[] }
   | { type: "stdout"; line: string };

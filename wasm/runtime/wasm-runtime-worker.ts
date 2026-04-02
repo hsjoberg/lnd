@@ -31,6 +31,16 @@ const streamCallbacks = new Map<number, StreamCallbacks>();
 const stdoutListeners = new Set<(line: string) => void>();
 const stdoutLines: string[] = [];
 
+function shouldMirrorStdoutToConsole() {
+  return Boolean(
+    (
+      globalThis as typeof globalThis & {
+        __lndWasmMirrorStdoutToConsole?: boolean;
+      }
+    ).__lndWasmMirrorStdoutToConsole,
+  );
+}
+
 function requestTransferables(message: RequestMessage): Transferable[] {
   switch (message.type) {
     case "invokeRpc":
@@ -83,6 +93,18 @@ function getWorker() {
           for (const listener of stdoutListeners) {
             listener(message.line);
           }
+          return;
+        case "stdoutBatch":
+          for (const line of message.lines) {
+            stdoutLines.push(line);
+            if (stdoutLines.length > 500) {
+              stdoutLines.shift();
+            }
+            for (const listener of stdoutListeners) {
+              listener(line);
+            }
+          }
+          return;
       }
     });
   }
@@ -106,14 +128,26 @@ function sendRequest<T>(message: RequestMessage): Promise<T> {
   });
 }
 
+function syncWorkerConsoleMirroring() {
+  return sendRequest<void>({
+    type: "setConsoleMirroring",
+    requestId: 0,
+    enabled: shouldMirrorStdoutToConsole(),
+  });
+}
+
 export function getWorkerWasmBackend(): WasmRuntimeBackend {
   return {
     loadWasmRuntime(fsBackend) {
-      return sendRequest<{ mode: FsBackend }>({
-        type: "load",
-        requestId: 0,
-        fsBackend,
-      }).then(
+      return syncWorkerConsoleMirroring()
+        .then(() =>
+          sendRequest<{ mode: FsBackend }>({
+            type: "load",
+            requestId: 0,
+            fsBackend,
+          }),
+        )
+        .then(
         (result) => {
           cachedStatus = 0;
           return result;
@@ -133,6 +167,7 @@ export function getWorkerWasmBackend(): WasmRuntimeBackend {
     },
 
     async startWasm(extraArgs) {
+      await syncWorkerConsoleMirroring();
       await sendRequest<void>({ type: "start", requestId: 0, extraArgs });
       cachedStatus = 1;
     },

@@ -3,12 +3,12 @@
 package backend
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall/js"
 	"time"
@@ -23,11 +23,45 @@ import (
 
 type timeoutError struct{}
 
-const websocketPortOffset = 2000
+const (
+	websocketPortOffset         = 2000
+	websocketReadPoolSize       = 64 * 1024
+	websocketWriteQueueSize     = 64
+	websocketWriteBatchMaxBytes = 256 * 1024
+)
 
 func (timeoutError) Error() string   { return "i/o timeout" }
 func (timeoutError) Timeout() bool   { return true }
 func (timeoutError) Temporary() bool { return true }
+
+type pooledWebsocketBuffer struct {
+	buf []byte
+}
+
+type websocketReadChunk struct {
+	data   []byte
+	offset int
+	pooled *pooledWebsocketBuffer
+}
+
+type websocketWriteRequest struct {
+	data []byte
+}
+
+var (
+	expiredDeadlineCh = func() chan time.Time {
+		ch := make(chan time.Time)
+		close(ch)
+		return ch
+	}()
+	websocketReadBufferPool = sync.Pool{
+		New: func() any {
+			return &pooledWebsocketBuffer{
+				buf: make([]byte, websocketReadPoolSize),
+			}
+		},
+	}
+)
 
 type websocketConn struct {
 	url        string
@@ -42,16 +76,77 @@ type websocketConn struct {
 	onErrSet   bool
 	onClose    js.Func
 	onCloseSet bool
-	readQueue  chan []byte
+	readQueue  chan websocketReadChunk
 	closeCh    chan struct{}
 	closeOnce  sync.Once
 	closeErrMu sync.RWMutex
 	closeErr   error
 	readBufMu  sync.Mutex
-	readBuf    bytes.Buffer
+	readBuf    []websocketReadChunk
+	writeQueue chan websocketWriteRequest
 	deadlineMu sync.RWMutex
 	readDL     time.Time
 	writeDL    time.Time
+}
+
+func websocketStateString(state int) string {
+	switch state {
+	case 0:
+		return "CONNECTING"
+	case 1:
+		return "OPEN"
+	case 2:
+		return "CLOSING"
+	case 3:
+		return "CLOSED"
+	default:
+		return strconv.Itoa(state)
+	}
+}
+
+func websocketErrorDetails(ws js.Value, event js.Value) string {
+	parts := []string{
+		fmt.Sprintf("readyState=%s", websocketStateString(ws.Get("readyState").Int())),
+	}
+
+	if protocol := ws.Get("protocol"); protocol.Type() == js.TypeString && protocol.String() != "" {
+		parts = append(parts, fmt.Sprintf("protocol=%q", protocol.String()))
+	}
+
+	if event.Truthy() {
+		if typ := event.Get("type"); typ.Type() == js.TypeString && typ.String() != "" {
+			parts = append(parts, fmt.Sprintf("event=%q", typ.String()))
+		}
+		if message := event.Get("message"); message.Type() == js.TypeString && message.String() != "" {
+			parts = append(parts, fmt.Sprintf("message=%q", message.String()))
+		}
+	}
+
+	return strings.Join(parts, ", ")
+}
+
+func websocketCloseError(ws js.Value, event js.Value) error {
+	parts := []string{
+		fmt.Sprintf("readyState=%s", websocketStateString(ws.Get("readyState").Int())),
+	}
+
+	if protocol := ws.Get("protocol"); protocol.Type() == js.TypeString && protocol.String() != "" {
+		parts = append(parts, fmt.Sprintf("protocol=%q", protocol.String()))
+	}
+
+	if event.Truthy() {
+		if code := event.Get("code"); code.Type() == js.TypeNumber {
+			parts = append(parts, fmt.Sprintf("code=%d", code.Int()))
+		}
+		if reason := event.Get("reason"); reason.Type() == js.TypeString && reason.String() != "" {
+			parts = append(parts, fmt.Sprintf("reason=%q", reason.String()))
+		}
+		if wasClean := event.Get("wasClean"); wasClean.Type() == js.TypeBoolean {
+			parts = append(parts, fmt.Sprintf("clean=%t", wasClean.Bool()))
+		}
+	}
+
+	return fmt.Errorf("websocket closed: %s", strings.Join(parts, ", "))
 }
 
 func newWebsocketConn(url, alias string, remoteAddr net.Addr,
@@ -66,7 +161,8 @@ func newWebsocketConn(url, alias string, remoteAddr net.Addr,
 		url:        url,
 		alias:      alias,
 		remoteAddr: remoteAddr,
-		readQueue:  make(chan []byte, 32),
+		readQueue:  make(chan websocketReadChunk, 32),
+		writeQueue: make(chan websocketWriteRequest, websocketWriteQueueSize),
 		closeCh:    make(chan struct{}),
 	}
 
@@ -86,10 +182,20 @@ func newWebsocketConn(url, alias string, remoteAddr net.Addr,
 		return nil
 	})
 	conn.onOpenSet = true
-	conn.onError = js.FuncOf(func(_ js.Value, args []js.Value) any {
-		err := errors.New("websocket error")
+	conn.onClose = js.FuncOf(func(_ js.Value, args []js.Value) any {
+		err := io.EOF
 		if len(args) > 0 {
-			err = fmt.Errorf("websocket error: %s", args[0].String())
+			err = websocketCloseError(conn.ws, args[0])
+		}
+		conn.setCloseErr(err)
+		conn.close()
+		return nil
+	})
+	conn.onCloseSet = true
+	conn.onError = js.FuncOf(func(_ js.Value, args []js.Value) any {
+		err := fmt.Errorf("websocket error: %s", websocketErrorDetails(conn.ws, js.Undefined()))
+		if len(args) > 0 {
+			err = fmt.Errorf("websocket error: %s", websocketErrorDetails(conn.ws, args[0]))
 		}
 		select {
 		case errCh <- err:
@@ -100,12 +206,6 @@ func newWebsocketConn(url, alias string, remoteAddr net.Addr,
 		return nil
 	})
 	conn.onErrSet = true
-	conn.onClose = js.FuncOf(func(_ js.Value, _ []js.Value) any {
-		conn.setCloseErr(io.EOF)
-		conn.close()
-		return nil
-	})
-	conn.onCloseSet = true
 	conn.onMessage = js.FuncOf(func(_ js.Value, args []js.Value) any {
 		if len(args) == 0 {
 			return nil
@@ -113,12 +213,19 @@ func newWebsocketConn(url, alias string, remoteAddr net.Addr,
 
 		data := args[0].Get("data")
 		uint8Array := js.Global().Get("Uint8Array").New(data)
-		payload := make([]byte, uint8Array.Get("length").Int())
+		payload, pooled := acquireWebsocketReadBuffer(
+			uint8Array.Get("length").Int(),
+		)
 		js.CopyBytesToGo(payload, uint8Array)
+		chunk := websocketReadChunk{
+			data:   payload,
+			pooled: pooled,
+		}
 
 		select {
-		case conn.readQueue <- payload:
+		case conn.readQueue <- chunk:
 		case <-conn.closeCh:
+			releaseWebsocketReadChunk(chunk)
 		}
 		return nil
 	})
@@ -128,6 +235,7 @@ func newWebsocketConn(url, alias string, remoteAddr net.Addr,
 	ws.Set("onerror", conn.onError)
 	ws.Set("onclose", conn.onClose)
 	ws.Set("onmessage", conn.onMessage)
+	go conn.writeLoop()
 
 	if timeout == 0 {
 		select {
@@ -156,10 +264,10 @@ func newWebsocketConn(url, alias string, remoteAddr net.Addr,
 func (c *websocketConn) Read(p []byte) (int, error) {
 	for {
 		c.readBufMu.Lock()
-		if c.readBuf.Len() > 0 {
-			n, err := c.readBuf.Read(p)
+		if len(c.readBuf) > 0 {
+			n := c.readQueuedLocked(p)
 			c.readBufMu.Unlock()
-			return n, err
+			return n, nil
 		}
 		c.readBufMu.Unlock()
 
@@ -168,30 +276,34 @@ func (c *websocketConn) Read(p []byte) (int, error) {
 		select {
 		case payload := <-c.readQueue:
 			c.readBufMu.Lock()
-			_, _ = c.readBuf.Write(payload)
+			c.readBuf = append(c.readBuf, payload)
 			c.readBufMu.Unlock()
 			continue
 		default:
 		}
 
+		readDeadline, stopDeadline := c.readDeadlineWait()
 		select {
 		case payload := <-c.readQueue:
 			c.readBufMu.Lock()
-			_, _ = c.readBuf.Write(payload)
+			c.readBuf = append(c.readBuf, payload)
 			c.readBufMu.Unlock()
 		case <-c.closeCh:
+			stopDeadline()
 			select {
 			case payload := <-c.readQueue:
 				c.readBufMu.Lock()
-				_, _ = c.readBuf.Write(payload)
+				c.readBuf = append(c.readBuf, payload)
 				c.readBufMu.Unlock()
 				continue
 			default:
 			}
 			return 0, c.getCloseErr()
-		case <-c.readDeadlineChan():
+		case <-readDeadline:
+			stopDeadline()
 			return 0, timeoutError{}
 		}
+		stopDeadline()
 	}
 }
 
@@ -199,24 +311,22 @@ func (c *websocketConn) Write(p []byte) (n int, err error) {
 	select {
 	case <-c.closeCh:
 		return 0, c.getCloseErr()
-	case <-c.writeDeadlineChan():
+	case <-c.writeDeadlineWaitChan():
 		return 0, timeoutError{}
 	default:
 	}
 
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("websocket send failed: %v", r)
-			n = 0
-			c.setCloseErr(err)
-			c.close()
-		}
-	}()
+	owned := append([]byte(nil), p...)
+	request := websocketWriteRequest{data: owned}
 
-	data := js.Global().Get("Uint8Array").New(len(p))
-	js.CopyBytesToJS(data, p)
-	c.ws.Call("send", data)
-	return len(p), nil
+	select {
+	case c.writeQueue <- request:
+		return len(p), nil
+	case <-c.closeCh:
+		return 0, c.getCloseErr()
+	case <-c.writeDeadlineWaitChan():
+		return 0, timeoutError{}
+	}
 }
 
 func (c *websocketConn) Close() error {
@@ -267,40 +377,19 @@ func (c *websocketConn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
-func (c *websocketConn) readDeadlineChan() <-chan time.Time {
+func (c *websocketConn) readDeadlineWait() (<-chan time.Time, func()) {
 	c.deadlineMu.RLock()
 	defer c.deadlineMu.RUnlock()
 
-	if c.readDL.IsZero() {
-		return nil
-	}
-
-	delay := time.Until(c.readDL)
-	if delay <= 0 {
-		ch := make(chan time.Time, 1)
-		ch <- time.Time{}
-		return ch
-	}
-
-	return time.After(delay)
+	return deadlineWait(c.readDL)
 }
 
-func (c *websocketConn) writeDeadlineChan() <-chan time.Time {
+func (c *websocketConn) writeDeadlineWaitChan() <-chan time.Time {
 	c.deadlineMu.RLock()
 	defer c.deadlineMu.RUnlock()
 
-	if c.writeDL.IsZero() {
-		return nil
-	}
-
-	delay := time.Until(c.writeDL)
-	if delay <= 0 {
-		ch := make(chan time.Time, 1)
-		ch <- time.Time{}
-		return ch
-	}
-
-	return time.After(delay)
+	ch, _ := deadlineWait(c.writeDL)
+	return ch
 }
 
 func (c *websocketConn) setCloseErr(err error) {
@@ -321,6 +410,137 @@ func (c *websocketConn) getCloseErr() error {
 	}
 
 	return io.EOF
+}
+
+func (c *websocketConn) readQueuedLocked(p []byte) int {
+	if len(p) == 0 {
+		return 0
+	}
+
+	total := 0
+	for len(c.readBuf) > 0 && total < len(p) {
+		chunk := &c.readBuf[0]
+		n := copy(p[total:], chunk.data[chunk.offset:])
+		total += n
+		chunk.offset += n
+		if chunk.offset < len(chunk.data) {
+			break
+		}
+
+		releaseWebsocketReadChunk(*chunk)
+		c.readBuf[0] = websocketReadChunk{}
+		c.readBuf = c.readBuf[1:]
+	}
+
+	return total
+}
+
+func (c *websocketConn) writeLoop() {
+	batch := make([]byte, 0, websocketWriteBatchMaxBytes)
+	var pending *websocketWriteRequest
+
+	for {
+		var request websocketWriteRequest
+		if pending != nil {
+			request = *pending
+			pending = nil
+		} else {
+			select {
+			case <-c.closeCh:
+				return
+			case request = <-c.writeQueue:
+			}
+		}
+
+		if len(request.data) == 0 {
+			continue
+		}
+
+		batch = append(batch[:0], request.data...)
+		drain := true
+		for drain && len(batch) < websocketWriteBatchMaxBytes {
+			select {
+			case next := <-c.writeQueue:
+				if len(next.data) == 0 {
+					continue
+				}
+
+				if len(batch)+len(next.data) > websocketWriteBatchMaxBytes {
+					pending = &next
+					drain = false
+					continue
+				}
+
+				batch = append(batch, next.data...)
+			default:
+				drain = false
+			}
+		}
+
+		if err := c.sendBatch(batch); err != nil {
+			c.setCloseErr(err)
+			c.close()
+			return
+		}
+	}
+}
+
+func (c *websocketConn) sendBatch(batch []byte) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("websocket send failed: %v", r)
+		}
+	}()
+
+	data := js.Global().Get("Uint8Array").New(len(batch))
+	js.CopyBytesToJS(data, batch)
+	c.ws.Call("send", data)
+	return nil
+}
+
+func acquireWebsocketReadBuffer(size int) ([]byte, *pooledWebsocketBuffer) {
+	if size <= 0 {
+		return nil, nil
+	}
+
+	if size <= websocketReadPoolSize {
+		pooled := websocketReadBufferPool.Get().(*pooledWebsocketBuffer)
+		return pooled.buf[:size], pooled
+	}
+
+	return make([]byte, size), nil
+}
+
+func releaseWebsocketReadChunk(chunk websocketReadChunk) {
+	if chunk.pooled == nil {
+		return
+	}
+
+	chunk.pooled.buf = chunk.pooled.buf[:websocketReadPoolSize]
+	websocketReadBufferPool.Put(chunk.pooled)
+}
+
+func deadlineWait(deadline time.Time) (<-chan time.Time, func()) {
+	if deadline.IsZero() {
+		return nil, func() {}
+	}
+
+	delay := time.Until(deadline)
+	if delay <= 0 {
+		return expiredDeadlineCh, func() {}
+	}
+
+	timer := time.NewTimer(delay)
+	return timer.C, func() {
+		if timer.Stop() {
+			return
+		}
+
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
 }
 
 func (c *websocketConn) close() {

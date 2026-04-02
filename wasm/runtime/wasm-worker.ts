@@ -11,6 +11,9 @@ import type { RequestMessage, ResponseMessage } from "./worker-protocol";
 // and stdout back to the main thread.
 const ASSET_ROOT = "/wasm";
 const scriptLoads = new Map<string, Promise<void>>();
+type WorkerGlobal = typeof globalThis & {
+  __lndWasmMirrorStdoutToConsole?: boolean;
+};
 
 type StreamHandle =
   | { stop(): void }
@@ -61,10 +64,30 @@ const backend: WasmRuntimeBackend = createGlobalWasmBackend(globalThis, {
   loadScriptOnce,
 });
 
+let stdoutFlushTimer: ReturnType<typeof setTimeout> | null = null;
+const pendingStdoutLines: string[] = [];
+
+function flushStdoutLines() {
+  if (stdoutFlushTimer) {
+    clearTimeout(stdoutFlushTimer);
+    stdoutFlushTimer = null;
+  }
+
+  if (pendingStdoutLines.length === 0) {
+    return;
+  }
+
+  const lines = pendingStdoutLines.splice(0, pendingStdoutLines.length);
+  postMessageToMain({ type: "stdoutBatch", lines });
+}
+
 // Stdout is forwarded as ordinary worker messages so the UI log panel can
 // behave the same in both runtime modes.
 backend.attachStdoutListener((line) => {
-  postMessageToMain({ type: "stdout", line });
+  pendingStdoutLines.push(line);
+  if (!stdoutFlushTimer) {
+    stdoutFlushTimer = setTimeout(flushStdoutLines, 50);
+  }
 });
 
 const streams = new Map<number, StreamHandle>();
@@ -89,6 +112,11 @@ self.addEventListener("message", async (event: MessageEvent<RequestMessage>) => 
     // The worker protocol stays intentionally small: request/response for
     // one-shot calls plus stream IDs for server/bidi RPC traffic.
     switch (message.type) {
+      case "setConsoleMirroring":
+        (globalThis as WorkerGlobal).__lndWasmMirrorStdoutToConsole =
+          message.enabled;
+        respondSuccess(message.requestId);
+        return;
       case "load":
         respondSuccess(
           message.requestId,

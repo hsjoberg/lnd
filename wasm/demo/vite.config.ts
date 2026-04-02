@@ -11,14 +11,21 @@ export default defineConfig({
       {
         find: /^@bufbuild\/protobuf$/,
         replacement: fileURLToPath(
-          new URL("./node_modules/@bufbuild/protobuf/dist/esm/index.js", import.meta.url),
+          new URL(
+            "./node_modules/@bufbuild/protobuf/dist/esm/index.js",
+            import.meta.url,
+          ),
         ),
       },
       {
         find: /^@bufbuild\/protobuf\/(.*)$/,
-        replacement: fileURLToPath(
-          new URL("./node_modules/@bufbuild/protobuf/dist/esm/", import.meta.url),
-        ) + "$1/index.js",
+        replacement:
+          fileURLToPath(
+            new URL(
+              "./node_modules/@bufbuild/protobuf/dist/esm/",
+              import.meta.url,
+            ),
+          ) + "$1/index.js",
       },
     ],
   },

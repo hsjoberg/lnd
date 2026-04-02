@@ -27,9 +27,16 @@
     max-width: 14ch;
 }
 
+.hero-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+}
+
 .runtime-pill {
     display: inline-flex;
-    margin-top: 18px;
+    flex-shrink: 0;
     padding: 8px 14px;
     border-radius: 999px;
     border: 1px solid rgba(34, 85, 91, 0.18);
@@ -53,11 +60,25 @@
     box-shadow: 0 12px 30px rgba(40, 31, 20, 0.05);
 }
 
-.top-row {
+.runtime-panel {
     grid-column: 1 / -1;
+}
+
+.runtime-columns {
     display: grid;
     gap: 16px;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: minmax(320px, 1.05fr) minmax(0, 1.35fr);
+}
+
+.runtime-section {
+    padding: 14px;
+    border: 1px solid rgba(102, 80, 56, 0.12);
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.44);
+}
+
+.runtime-section label:first-child {
+    margin-top: 0;
 }
 
 .panel h2 {
@@ -115,7 +136,7 @@ button {
     border: 0;
     border-radius: 999px;
     padding: 11px 14px;
-    background: #b85c38;
+    background: #23585b;
     color: #fff8f4;
     cursor: pointer;
     transition:
@@ -123,13 +144,16 @@ button {
         filter 140ms ease;
 }
 
-button.alt {
-    background: #23585b;
+button:hover {
+    /*transform: translateY(-1px);*/
+    filter: brightness(1.25);
 }
 
-button:hover {
-    transform: translateY(-1px);
-    filter: brightness(1.03);
+button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+    transform: none;
+    filter: none;
 }
 
 .button-grid {
@@ -137,6 +161,11 @@ button:hover {
     gap: 10px;
     grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
     margin-top: 14px;
+}
+
+.button-grid button {
+    font-size: 0.84rem;
+    line-height: 1.2;
 }
 
 .scrollbox {
@@ -178,7 +207,12 @@ button:hover {
         grid-template-columns: 1fr 1fr;
     }
 
-    .top-row {
+    .hero-row {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .runtime-columns {
         grid-template-columns: 1fr;
     }
 }

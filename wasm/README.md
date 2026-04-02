@@ -84,3 +84,19 @@ That copy step is handled by:
 
 So the source of truth lives under `wasm/runtime`, while the demo only serves
 the copied assets.
+
+## Runtime Notes
+
+- The OPFS backend in [runtime/fs_backends.js](./runtime/fs_backends.js) does
+  not currently have a metadata-only rename path. Its `rename()` implementation
+  copies the source entry to the destination and then deletes the source.
+- That means renaming large files or directory trees in wasm can be much more
+  expensive than on native filesystems, where rename is often effectively
+  constant-time.
+- Stdout from the wasm runtime is still forwarded back through the runtime/app
+  log pipeline, but it is not mirrored to the browser console by default.
+- Console mirroring can be re-enabled by setting
+  `globalThis.__lndWasmMirrorStdoutToConsole = true` before loading the runtime.
+- The worker OPFS backend will use `FileSystemSyncAccessHandle` when available.
+- That can be disabled for testing by setting
+  `globalThis.__lndWasmDisableOPFSSyncAccess = true` before loading the runtime.

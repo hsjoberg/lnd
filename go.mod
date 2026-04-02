@@ -226,8 +226,6 @@ go 1.24.11
 // Temporary replace until the next version of sqldb is taged.
 replace github.com/lightningnetwork/lnd/sqldb => ./sqldb
 
-replace github.com/lightningnetwork/lnd/kvdb => ./kvdb
-
 // Blixt overrides
 replace github.com/lightningnetwork/lnd/tor => ./tor
 

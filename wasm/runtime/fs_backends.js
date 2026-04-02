@@ -22,6 +22,14 @@
   const output = { buf: "" };
   const textDecoder = new TextDecoder();
 
+  function shouldDisableOPFSSyncAccess() {
+    return Boolean(globalThis.__lndWasmDisableOPFSSyncAccess);
+  }
+
+  function shouldMirrorStdoutToConsole() {
+    return Boolean(globalThis.__lndWasmMirrorStdoutToConsole);
+  }
+
   globalThis.__lndWasmStdoutLines = globalThis.__lndWasmStdoutLines || [];
   globalThis.__lndWasmOnStdoutLine = globalThis.__lndWasmOnStdoutLine || null;
 
@@ -52,7 +60,9 @@
     let nl = output.buf.indexOf("\n");
     while (nl !== -1) {
       const line = output.buf.slice(0, nl);
-      console.log(line);
+      if (shouldMirrorStdoutToConsole()) {
+        console.log(line);
+      }
       pushStdoutLine(line);
       output.buf = output.buf.slice(nl + 1);
       nl = output.buf.indexOf("\n");
@@ -460,6 +470,7 @@
       nextIno: 2,
       fds: new Map(),
       inoByPath: new Map([["/", 1]]),
+      syncAccessByPath: new Map(),
     };
 
     function assignIno(path) {
@@ -477,6 +488,21 @@
           state.inoByPath.delete(key);
         }
       }
+    }
+
+    function ensureFileCapacity(entry, size) {
+      if (entry.data.length >= size) {
+        return;
+      }
+
+      let nextCapacity = entry.data.length || 4096;
+      while (nextCapacity < size) {
+        nextCapacity *= 2;
+      }
+
+      const next = new Uint8Array(nextCapacity);
+      next.set(entry.data.subarray(0, entry.size));
+      entry.data = next;
     }
 
     function splitPath(path) {
@@ -605,8 +631,10 @@
 
     async function readFileData(handle) {
       const file = await handle.getFile();
+      const data = new Uint8Array(await file.arrayBuffer());
       return {
-        data: new Uint8Array(await file.arrayBuffer()),
+        data,
+        size: data.length,
         mtimeMs: file.lastModified || Date.now(),
       };
     }
@@ -638,6 +666,9 @@
       clearInoPath(path);
     }
 
+    // OPFS does not currently expose a true move/rename primitive for arbitrary
+    // files/directories through this shim, so rename() is implemented below as
+    // copy + delete. That is correct but can be expensive for large files.
     async function copyEntry(sourcePath, destPath) {
       const source = await getEntry(sourcePath);
       if (source.kind === "file") {
@@ -666,13 +697,85 @@
       }
     }
 
+    function updateOpenFileState(path, size, mtimeMs) {
+      for (const entry of state.fds.values()) {
+        if (entry && entry.kind === "file" && entry.path === path) {
+          entry.size = size;
+          entry.mtimeMs = mtimeMs;
+          if (entry.position > size) {
+            entry.position = size;
+          }
+        }
+      }
+    }
+
+    function getOpenFileState(path) {
+      const normalized = normalizePath(state.cwd, path);
+      for (const entry of state.fds.values()) {
+        if (entry && entry.kind === "file" && entry.path === normalized) {
+          return entry;
+        }
+      }
+      return null;
+    }
+
+    async function acquireSyncAccess(path, handle) {
+      if (shouldDisableOPFSSyncAccess()) {
+        return null;
+      }
+
+      const normalized = normalizePath(state.cwd, path);
+      const existing = state.syncAccessByPath.get(normalized);
+      if (existing) {
+        existing.refs += 1;
+        return existing;
+      }
+
+      if (typeof handle.createSyncAccessHandle !== "function") {
+        return null;
+      }
+
+      try {
+        const syncHandle = await handle.createSyncAccessHandle();
+        const access = { handle: syncHandle, refs: 1 };
+        state.syncAccessByPath.set(normalized, access);
+        return access;
+      } catch {
+        return null;
+      }
+    }
+
+    function releaseSyncAccess(path, access) {
+      if (!access) {
+        return;
+      }
+
+      const normalized = normalizePath(state.cwd, path);
+      const current = state.syncAccessByPath.get(normalized);
+      if (!current || current !== access) {
+        return;
+      }
+
+      current.refs -= 1;
+      if (current.refs <= 0) {
+        current.handle.close();
+        state.syncAccessByPath.delete(normalized);
+      }
+    }
+
     async function flushFD(entry) {
       if (!entry || entry.kind !== "file" || !entry.dirty) {
         return;
       }
 
+      if (entry.syncAccess) {
+        entry.syncAccess.handle.flush();
+        entry.dirty = false;
+        return;
+      }
+
       const writable = await entry.handle.createWritable();
-      await writable.write(entry.data);
+      await writable.write(entry.data.subarray(0, entry.size));
       await writable.close();
       entry.dirty = false;
     }
@@ -762,11 +865,40 @@
           throw mkError("EISDIR");
         }
 
+        const syncAccess = await acquireSyncAccess(normalized, entry.handle);
+        if (syncAccess) {
+          const size = syncAccess.handle.getSize();
+          const fd = state.nextFd++;
+          state.fds.set(fd, {
+            kind: "file",
+            handle: entry.handle,
+            path: normalized,
+            syncAccess,
+            size,
+            mtimeMs: Date.now(),
+            dirty: Boolean(flags & O_TRUNC),
+            position: flags & O_APPEND ? size : 0,
+            writeThrough: Boolean(flags & O_APPEND),
+            mode: S_IFREG | (mode || 0o644),
+          });
+
+          if (flags & O_TRUNC) {
+            syncAccess.handle.truncate(0);
+            syncAccess.handle.flush();
+            updateOpenFileState(normalized, 0, Date.now());
+            state.fds.get(fd).dirty = false;
+          }
+
+          return fd;
+        }
+
         let data = new Uint8Array(0);
+        let size = 0;
         let mtimeMs = Date.now();
         if (!(flags & O_TRUNC)) {
           const existing = await readFileData(entry.handle);
           data = existing.data;
+          size = existing.size;
           mtimeMs = existing.mtimeMs;
         }
 
@@ -776,9 +908,10 @@
           handle: entry.handle,
           path: normalized,
           data,
+          size,
           mtimeMs,
           dirty: Boolean(flags & O_TRUNC),
-          position: flags & O_APPEND ? data.length : 0,
+          position: flags & O_APPEND ? size : 0,
           // Some append-only users, notably neutrino headerfs, keep files open
           // for the lifetime of the process and rely on append writes being
           // durably reflected on disk without an explicit close on shutdown.
@@ -794,6 +927,9 @@
         }
 
         await flushFD(entry);
+        if (entry.kind === "file" && entry.syncAccess) {
+          releaseSyncAccess(entry.path, entry.syncAccess);
+        }
         state.fds.delete(fd);
       },
       read(fd, buffer, offset, length, position) {
@@ -806,7 +942,27 @@
         }
 
         const start = position == null ? entry.position : Number(position);
-        const end = Math.min(start + length, entry.data.length);
+        if (entry.syncAccess) {
+          const available = entry.size - start;
+          if (available <= 0) {
+            if (position == null) {
+              entry.position = entry.size;
+            }
+            return 0;
+          }
+
+          const target = buffer.subarray(
+            offset,
+            offset + Math.min(length, available),
+          );
+          const bytesRead = entry.syncAccess.handle.read(target, { at: start });
+          if (position == null) {
+            entry.position = start + bytesRead;
+          }
+          return bytesRead;
+        }
+
+        const end = Math.min(start + length, entry.size);
         const slice = entry.data.subarray(start, end);
         buffer.set(slice, offset);
         if (position == null) {
@@ -825,9 +981,33 @@
 
         const start = position == null ? entry.position : Number(position);
         const end = start + length;
-        ensureSize(entry, end);
+        const now = Date.now();
+        if (entry.syncAccess) {
+          const written = entry.syncAccess.handle.write(
+            buf.subarray(offset, offset + length),
+            { at: start },
+          );
+          const nextSize = Math.max(entry.size, start + written);
+          updateOpenFileState(entry.path, nextSize, now);
+          entry.dirty = true;
+          if (position == null) {
+            entry.position = start + written;
+          }
+
+          if (entry.writeThrough) {
+            await flushFD(entry);
+          }
+
+          return written;
+        }
+
+        ensureFileCapacity(entry, end);
+        if (start > entry.size) {
+          entry.data.fill(0, entry.size, start);
+        }
         entry.data.set(buf.subarray(offset, offset + length), start);
-        entry.mtimeMs = Date.now();
+        entry.size = Math.max(entry.size, end);
+        entry.mtimeMs = now;
         entry.dirty = true;
         if (position == null) {
           entry.position = end;
@@ -848,10 +1028,19 @@
           );
         }
 
+        const openFile = getOpenFileState(entry.path);
+        if (openFile) {
+          return makeStatForFile(
+            entry.path,
+            openFile.size,
+            openFile.mtimeMs || Date.now(),
+          );
+        }
+
         const file = await entry.handle.getFile();
         return makeStatForFile(
           entry.path,
-          file.size,
+          state.syncAccessByPath.get(entry.path)?.handle.getSize() ?? file.size,
           file.lastModified || Date.now(),
         );
       },
@@ -870,9 +1059,17 @@
           );
         }
 
+        if (entry.syncAccess) {
+          return makeStatForFile(
+            entry.path,
+            entry.size,
+            entry.mtimeMs || Date.now(),
+          );
+        }
+
         return makeStatForFile(
           entry.path,
-          entry.data.length,
+          entry.size,
           entry.mtimeMs || Date.now(),
         );
       },
@@ -936,6 +1133,10 @@
           return;
         }
 
+        // This is intentionally not metadata-only. In the OPFS backend we
+        // currently emulate rename by copying the source tree to the
+        // destination and then deleting the source, which means large-file
+        // renames are proportional to file size rather than effectively free.
         await removeExistingDestination(destPath);
         await copyEntry(sourcePath, destPath);
 
@@ -954,9 +1155,17 @@
           throw mkError("EISDIR");
         }
 
+        const syncAccess = state.syncAccessByPath.get(normalized);
+        const size = Number(length);
+        if (syncAccess) {
+          syncAccess.handle.truncate(size);
+          syncAccess.handle.flush();
+          updateOpenFileState(normalized, size, Date.now());
+          return;
+        }
+
         const current = await readFileData(entry.handle);
         let next = current.data;
-        const size = Number(length);
         if (size < next.length) {
           next = next.subarray(0, size);
         } else {
@@ -979,10 +1188,24 @@
         }
 
         const size = Number(length);
-        if (size < entry.data.length) {
-          entry.data = entry.data.subarray(0, size);
+        if (entry.syncAccess) {
+          entry.syncAccess.handle.truncate(size);
+          updateOpenFileState(entry.path, size, Date.now());
+          entry.dirty = true;
+          return;
+        }
+
+        if (size < entry.size) {
+          entry.size = size;
+          if (entry.position > size) {
+            entry.position = size;
+          }
         } else {
-          ensureSize(entry, size);
+          ensureFileCapacity(entry, size);
+          if (size > entry.size) {
+            entry.data.fill(0, entry.size, size);
+          }
+          entry.size = size;
         }
         entry.mtimeMs = Date.now();
         entry.dirty = true;
