@@ -1021,9 +1021,8 @@ func (d *DefaultDatabaseBuilder) BuildDatabase(
 			"backends: %v", err)
 	}
 
-	// With the full remote mode we made sure both the graph and channel
-	// state DB point to the same local or remote DB and the same namespace
-	// within that DB.
+	// Backends can decide whether graph and channel state share storage or
+	// live on distinct backends. We only rely on the logical split here.
 	dbs := &DatabaseInstances{
 		HeightHintDB:   databaseBackends.HeightHintDB,
 		MacaroonDB:     databaseBackends.MacaroonDB,
@@ -1094,15 +1093,12 @@ func (d *DefaultDatabaseBuilder) BuildDatabase(
 		channeldb.OptionTombstoneClosedChannels(tombstoneClosedChans),
 	}
 
-	// Otherwise, we'll open two instances, one for the state we only need
-	// locally, and the other for things we want to ensure are replicated.
+	// Open the local channel state DB first.
 	dbs.ChanStateDB, err = channeldb.CreateWithBackend(
 		databaseBackends.ChanStateDB, dbOptions...,
 	)
 	switch {
-	// Give the DB a chance to dry run the migration. Since we know that
-	// both the channel state and graph DBs are still always behind the same
-	// backend, we know this would be applied to both of those DBs.
+	// Give the channel state DB a chance to dry run its migrations.
 	case err == channeldb.ErrDryRunMigrationOK:
 		d.logger.Infof("Channel DB dry run migration successful")
 		return nil, nil, err
@@ -1110,7 +1106,7 @@ func (d *DefaultDatabaseBuilder) BuildDatabase(
 	case err != nil:
 		cleanUp()
 
-		err = fmt.Errorf("unable to open graph DB: %w", err)
+		err = fmt.Errorf("unable to open channel state DB: %w", err)
 		d.logger.Error(err)
 		return nil, nil, err
 	}
@@ -1173,7 +1169,7 @@ func (d *DefaultDatabaseBuilder) BuildDatabase(
 					QueryCfg:  queryCfg,
 				}
 				err := graphdbmig1.MigrateGraphToSQL(
-					ctx, cfg, dbs.ChanStateDB.Backend,
+					ctx, cfg, databaseBackends.GraphDB,
 					graphmig1sqlc.New(tx.GetTx()),
 				)
 				if err != nil {

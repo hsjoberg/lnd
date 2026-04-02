@@ -234,4 +234,6 @@ replace github.com/breez/breez => github.com/djkazic/breez v0.0.8
 
 replace github.com/btcsuite/btcwallet/walletdb => github.com/djkazic/btcwallet/walletdb v1.7.4
 
+replace github.com/lightningnetwork/lnd/kvdb => ./kvdb
+
 retract v0.0.2
