@@ -575,6 +575,7 @@ wasm: mobile-rpc mobile-gomobile-mode gen-wasm-registry
 	mkdir -p $(WASM_BUILD_DIR)
 	GOOS=js GOARCH=wasm CGO_ENABLED=0 $(GOBUILD) -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -o "$(WASM_BUILD)" $(PKG)/wasm
 	cp -f "$$($(GOCC) env GOROOT)/lib/wasm/wasm_exec.js" "$(WASM_EXEC_BUILD)"
+	$(GOCC) run ./cmd/genwasmexports "$(WASM_BUILD_DIR)"
 
 #? clean: Remove all generated files
 clean:

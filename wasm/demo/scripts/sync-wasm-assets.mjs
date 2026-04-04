@@ -13,6 +13,8 @@ const runtimeRoot = join(repoRoot, "wasm", "runtime");
 mkdirSync(publicWasmDir, { recursive: true });
 const wasmExecPath = join(buildRoot, "wasm_exec.js");
 const wasmBinaryPath = join(buildRoot, "lndmobile.wasm");
+const memFsBridgePath = join(runtimeRoot, "fs_mem_backend.js");
+const opfsBridgePath = join(runtimeRoot, "fs_opfs_backend.js");
 const fsBridgePath = join(runtimeRoot, "fs_backends.js");
 
 if (!existsSync(wasmBinaryPath)) {
@@ -33,9 +35,19 @@ if (!existsSync(fsBridgePath)) {
   process.stderr.write(`missing fs_backends.js at ${fsBridgePath}\n`);
   process.exit(1);
 }
+if (!existsSync(memFsBridgePath)) {
+  process.stderr.write(`missing fs_mem_backend.js at ${memFsBridgePath}\n`);
+  process.exit(1);
+}
+if (!existsSync(opfsBridgePath)) {
+  process.stderr.write(`missing fs_opfs_backend.js at ${opfsBridgePath}\n`);
+  process.exit(1);
+}
 
 cpSync(wasmBinaryPath, join(publicWasmDir, "lndmobile.wasm"));
 cpSync(wasmExecPath, join(publicWasmDir, "wasm_exec.js"));
+cpSync(memFsBridgePath, join(publicWasmDir, "fs_mem_backend.js"));
+cpSync(opfsBridgePath, join(publicWasmDir, "fs_opfs_backend.js"));
 cpSync(fsBridgePath, join(publicWasmDir, "fs_backends.js"));
 
 process.stdout.write(`synced wasm assets to ${publicWasmDir}\n`);

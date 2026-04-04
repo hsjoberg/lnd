@@ -55,7 +55,6 @@ import {
   GetStateResponseSchema,
   SubscribeStateRequestSchema,
   SubscribeStateResponseSchema,
-  WalletState,
 } from "react-native-turbo-lnd/protos/stateservice_pb";
 import type {
   GetStateResponse,
@@ -72,9 +71,40 @@ import {
 import type { UnlockWalletResponse } from "react-native-turbo-lnd/protos/walletunlocker_pb";
 import "./App.css";
 import {
+  ChannelsPanel,
+  LoadspeederPanel,
+  LogPanel,
+  PaymentsPanel,
+  PeersPanel,
+  ResultPanel,
+  RuntimePanel,
+  StreamsPanel,
+  WalletPanel,
+} from "./demo-panels";
+import {
+  appendMissingFlags,
+  bytesToBase64,
+  DEFAULT_EXTRA_ARGS,
+  DEFAULT_LND_CONF,
+  DEFAULT_LOADSPEEDER_TARGET_PATH,
+  DEFAULT_LOADSPEEDER_URL,
+  downloadFileToOPFS,
+  encodeBytes,
+  formatDurationMs,
+  hexToBytes,
+  invokeUnary,
+  parseConnectPeerTarget,
+  parseSeedWords,
+  stateName,
+  stringifyResult,
+  textByteLength,
+  writeTextFileToOPFS,
+} from "./demo-support";
+import type { ResultValue } from "./demo-support";
+import {
   attachStdoutListener,
+  hasLoadedWasmRuntime,
   getWasmStatus,
-  invokeRpc,
   loadWasmRuntime,
   openBidiStream,
   openServerStream,
@@ -83,181 +113,12 @@ import {
   type RuntimeMode,
 } from "../../runtime";
 
-type ResultValue = string | Record<string, unknown>;
-
-const DEFAULT_EXTRA_ARGS =
-  '--lnddir="/lnd" --bitcoin.node=neutrino --bitcoin.testnet --norest --no-rest-tls --nolisten --nobootstrap --no-macaroons --tlsdisableautofill --rpclisten=127.0.0.1:10009 --restlisten=127.0.0.1:8080 --tor.socks=127.0.0.1:9050 --tor.control=127.0.0.1:9051 --debuglevel="info"';
-
-const DEFAULT_LND_CONF = `bitcoin.node=neutrino
-bitcoin.testnet=1
-norest=1
-no-rest-tls=1
-nolisten=1
-nobootstrap=1
-no-macaroons=1
-tlsdisableautofill=1
-rpclisten=127.0.0.1:10009
-restlisten=127.0.0.1:8080
-tor.socks=127.0.0.1:9050
-tor.control=127.0.0.1:9051
-debuglevel=info
-`;
-
-const encoder = new TextEncoder();
-
-function encodeBytes(value: string) {
-  return encoder.encode(value);
-}
-
-async function writeTextFileToOPFS(path: string, contents: string) {
-  if (
-    !navigator.storage ||
-    typeof navigator.storage.getDirectory !== "function"
-  ) {
-    throw new Error("OPFS is not available in this browser/context");
-  }
-
-  const parts = path.split("/").filter(Boolean);
-  if (parts.length === 0) {
-    throw new Error("path must point to a file");
-  }
-
-  let directory = await navigator.storage.getDirectory();
-  for (const part of parts.slice(0, -1)) {
-    directory = await directory.getDirectoryHandle(part, { create: true });
-  }
-
-  const fileHandle = await directory.getFileHandle(parts[parts.length - 1], {
-    create: true,
-  });
-  const writable = await fileHandle.createWritable();
-  await writable.write(contents);
-  await writable.close();
-}
-
-function parseSeedWords(seedWords: string) {
-  return seedWords
-    .split(/\s+/)
-    .map((word) => word.trim())
-    .filter(Boolean);
-}
-
-function bytesToBase64(bytes: Uint8Array) {
-  let raw = "";
-  for (const byte of bytes) {
-    raw += String.fromCharCode(byte);
-  }
-  return btoa(raw);
-}
-
-function hexToBytes(value: string) {
-  const hex = value.trim().replace(/^0x/, "");
-  if (!hex) {
-    return new Uint8Array();
-  }
-  if (hex.length % 2 !== 0) {
-    throw new Error("hex string must have even length");
-  }
-
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < hex.length; i += 2) {
-    const byte = Number.parseInt(hex.slice(i, i + 2), 16);
-    if (Number.isNaN(byte)) {
-      throw new Error("invalid hex string");
-    }
-    bytes[i / 2] = byte;
-  }
-  return bytes;
-}
-
-function toDisplayValue(value: unknown): unknown {
-  if (value instanceof Uint8Array) {
-    return {
-      bytes_base64: bytesToBase64(value),
-      length: value.length,
-    };
-  }
-
-  if (typeof value === "bigint") {
-    return value.toString();
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((item) => toDisplayValue(item));
-  }
-
-  if (!value || typeof value !== "object") {
-    return value;
-  }
-
-  const entries = Object.entries(value as Record<string, unknown>)
-    .filter(([key]) => key !== "$typeName")
-    .map(([key, entryValue]) => [key, toDisplayValue(entryValue)]);
-
-  return Object.fromEntries(entries);
-}
-
-function stringifyResult(value: ResultValue) {
-  if (typeof value === "string") {
-    return value;
-  }
-
-  return JSON.stringify(toDisplayValue(value), null, 2);
-}
-
-function formatDurationMs(durationMs: number) {
-  return `${durationMs.toFixed(1)} ms`;
-}
-
-function stateName(state: WalletState) {
-  return WalletState[state] ?? String(state);
-}
-
-function parseConnectPeerTarget(value: string) {
-  const target = value.trim();
-  const atIndex = target.indexOf("@");
-  if (atIndex <= 0 || atIndex === target.length - 1) {
-    throw new Error("connect peer target must be in pubkey@host:port format");
-  }
-
-  const pubkey = target.slice(0, atIndex).trim();
-  const host = target.slice(atIndex + 1).trim();
-  if (!pubkey || !host) {
-    throw new Error("connect peer target must be in pubkey@host:port format");
-  }
-
-  return { pubkey, host };
-}
-
-function appendMissingFlags(args: string, flags: string[]) {
-  let nextArgs = args.trim();
-
-  for (const flag of flags) {
-    if (!nextArgs.includes(flag)) {
-      nextArgs = nextArgs ? `${nextArgs} ${flag}` : flag;
-    }
-  }
-
-  return nextArgs;
-}
-
-async function invokeUnary<TResponse>(
-  method: string,
-  requestSchema: any,
-  requestInit: Record<string, unknown>,
-  responseSchema: any,
-) {
-  const request = create(requestSchema, requestInit);
-  const requestBytes = toBinary(requestSchema, request);
-  const responseBytes = await invokeRpc(method, requestBytes);
-  return fromBinary(responseSchema, responseBytes) as TResponse;
-}
-
 function App() {
   const [fsBackend, setFsBackend] = useState<FsBackend>("opfs");
   const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("worker");
   const [extraArgs, setExtraArgs] = useState(DEFAULT_EXTRA_ARGS);
   const [lndConf, setLndConf] = useState(DEFAULT_LND_CONF);
+  const [loadspeederUrl, setLoadspeederUrl] = useState(DEFAULT_LOADSPEEDER_URL);
   const [seedPassphrase, setSeedPassphrase] = useState("");
   const [walletPassword, setWalletPassword] = useState("password123");
   const [seedWords, setSeedWords] = useState("");
@@ -391,13 +252,13 @@ function App() {
 
   async function runAction(
     label: string,
-    action: () => Promise<ResultValue> | ResultValue,
+    action: () => Promise<unknown> | unknown,
   ) {
     const startedAt = performance.now();
     try {
       const result = await action();
-      showTimedResult(label, startedAt, result);
-      return result;
+      showTimedResult(label, startedAt, result as ResultValue);
+      return result as ResultValue;
     } catch (error) {
       showTimedError(label, startedAt, error);
       throw error;
@@ -423,7 +284,7 @@ function App() {
     appendLog("wrote /lnd/lnd.conf");
     return {
       path: "/lnd/lnd.conf",
-      bytes: encoder.encode(lndConf).length,
+      bytes: textByteLength(lndConf),
       backend: fsBackend,
     };
   }
@@ -436,6 +297,31 @@ function App() {
     await startWasm(extraArgs);
     setRuntimeStatus(`started (${runtimeMode})`);
     return { ok: true };
+  }
+
+  async function runLoadspeeder() {
+    if (fsBackend !== "opfs") {
+      throw new Error("loadspeeder currently requires the OPFS backend");
+    }
+
+    if (hasLoadedWasmRuntime() && getWasmStatus()) {
+      throw new Error("loadspeeder requires lnd to be stopped");
+    }
+
+    const url = loadspeederUrl.trim();
+    if (!url) {
+      throw new Error("missing loadspeeder URL");
+    }
+
+    const targetPath = DEFAULT_LOADSPEEDER_TARGET_PATH;
+    appendLog(`loadspeeder downloading ${url}`);
+    const bytes = await downloadFileToOPFS(url, targetPath);
+    appendLog(`loadspeeder wrote ${targetPath}`);
+    return {
+      url,
+      target_path: targetPath,
+      bytes,
+    };
   }
 
   async function getState() {
@@ -799,376 +685,109 @@ function App() {
       </section>
 
       <div className="app-grid">
-        <section className="panel runtime-panel">
-          <h2>Runtime</h2>
+        <RuntimePanel
+          fsBackend={fsBackend}
+          runtimeMode={runtimeMode}
+          extraArgs={extraArgs}
+          lndConf={lndConf}
+          runtimeStatus={runtimeStatus}
+          onSetFsBackend={setFsBackend}
+          onSetRuntimeMode={setRuntimeMode}
+          onSetExtraArgs={setExtraArgs}
+          onSetLndConf={setLndConf}
+          onRunAction={runAction}
+          onLoadRuntime={loadRuntime}
+          onStartLnd={startLnd}
+          onAutoStartWallet={autoStartAndWallet}
+          onWriteLndConfig={writeLndConfig}
+          onGetStatus={() => ({ lnd_started: getWasmStatus() })}
+          onGetState={async () => {
+            const response = await getState();
+            return {
+              ...response,
+              state_name: stateName(response.state),
+            };
+          }}
+          onGetInfo={getInfo}
+          onGetNetworkInfo={getNetworkInfo}
+          onGetNeutrinoStatus={getNeutrinoStatus}
+          onBenchmarkGetInfo={benchmarkGetInfo}
+          onBenchmarkGetNetworkInfo={benchmarkGetNetworkInfo}
+          onBenchmarkListChannels={benchmarkListChannels}
+          onStopDaemon={stopDaemon}
+          onListChannels={listChannels}
+        />
 
-          <div className="runtime-columns">
-            <div className="runtime-section">
-              <label htmlFor="fsBackend">FS backend</label>
-              <select
-                id="fsBackend"
-                value={fsBackend}
-                onChange={(event) =>
-                  setFsBackend(event.target.value as FsBackend)
-                }
-              >
-                <option value="opfs">opfs</option>
-                <option value="memory">memory</option>
-              </select>
-
-              <label htmlFor="runtimeMode">Runtime mode</label>
-              <select
-                id="runtimeMode"
-                value={runtimeMode}
-                onChange={(event) =>
-                  setRuntimeMode(event.target.value as RuntimeMode)
-                }
-              >
-                <option value="worker">Web Worker</option>
-                <option value="direct">Main thread</option>
-              </select>
-
-              <div className="button-grid">
-                <button
-                  disabled={runtimeStatus !== "not loaded"}
-                  onClick={() => void runAction("load wasm", loadRuntime)}
-                >
-                  Load wasm
-                </button>
-                <button onClick={() => void runAction("start", startLnd)}>
-                  Start
-                </button>
-                <button
-                  onClick={() =>
-                    void runAction("auto_start_wallet", async () => {
-                      await autoStartAndWallet();
-                      return { ok: true };
-                    })
-                  }
-                >
-                  Start + auto wallet
-                </button>
-                <button
-                  onClick={() =>
-                    void runAction("write_lnd_conf", writeLndConfig)
-                  }
-                >
-                  Write lnd.conf
-                </button>
-                <button
-                  onClick={() =>
-                    void runAction("status", async () => ({
-                      lnd_started: getWasmStatus(),
-                    }))
-                  }
-                >
-                  Get status
-                </button>
-                <button
-                  onClick={() =>
-                    void runAction("get_state", async () => {
-                      const response = await getState();
-                      return {
-                        ...response,
-                        state_name: stateName(response.state),
-                      };
-                    })
-                  }
-                >
-                  Get state
-                </button>
-                <button onClick={() => void runAction("get_info", getInfo)}>
-                  Get info
-                </button>
-                <button
-                  onClick={() =>
-                    void runAction("get_network_info", getNetworkInfo)
-                  }
-                >
-                  GetNetworkInfo
-                </button>
-                <button
-                  onClick={() =>
-                    void runAction("neutrino_status", getNeutrinoStatus)
-                  }
-                >
-                  Neutrino Status
-                </button>
-                <button onClick={() => void benchmarkGetInfo(100)}>
-                  GetInfo x 100
-                </button>
-                <button onClick={() => void benchmarkGetNetworkInfo(100)}>
-                  GetNetworkInfo x 100
-                </button>
-                <button onClick={() => void benchmarkListChannels(100)}>
-                  ListChannels x 100
-                </button>
-                <button
-                  onClick={() => void runAction("stop_daemon", stopDaemon)}
-                >
-                  StopDaemon
-                </button>
-                <button
-                  className="alt"
-                  onClick={() => void runAction("list_channels", listChannels)}
-                >
-                  ListChannels
-                </button>
-              </div>
-            </div>
-
-            <div className="runtime-section">
-              <label htmlFor="extraArgs">Start extraArgs</label>
-              <textarea
-                id="extraArgs"
-                value={extraArgs}
-                onChange={(event) => setExtraArgs(event.target.value)}
-              />
-
-              <label htmlFor="lndConf">/lnd/lnd.conf (OPFS)</label>
-              <textarea
-                id="lndConf"
-                value={lndConf}
-                onChange={(event) => setLndConf(event.target.value)}
-              />
-            </div>
-          </div>
-        </section>
-
-        <section className="panel">
-          <div className="panel-heading">
-            <h2>Last Result</h2>
-            <span className="panel-note">
-              BigInts and bytes are normalized for display.
-            </span>
-          </div>
-          <pre className="scrollbox result-scrollbox">{lastResult}</pre>
-        </section>
-
-        <section className="panel">
-          <div className="panel-heading">
-            <h2>Log</h2>
-            <span className="panel-note">{logLines.length} lines kept</span>
-          </div>
-          <pre
-            ref={logScrollboxRef}
-            className="scrollbox log-scrollbox"
-            onScroll={updateLogAutoScrollState}
-          >
-            {logLines.join("\n")}
-          </pre>
-        </section>
-
-        <section className="panel">
-          <h2>Wallet</h2>
-
-          <label htmlFor="seedPassphrase">Seed passphrase</label>
-          <input
-            id="seedPassphrase"
-            value={seedPassphrase}
-            onChange={(event) => setSeedPassphrase(event.target.value)}
-            placeholder="Optional aezeed passphrase"
-          />
-
-          <label htmlFor="walletPassword">Wallet password</label>
-          <input
-            id="walletPassword"
-            type="password"
-            value={walletPassword}
-            onChange={(event) => setWalletPassword(event.target.value)}
-            placeholder="At least 8 chars"
-          />
-
-          <label htmlFor="seedWords">Mnemonic words</label>
-          <textarea
-            id="seedWords"
-            value={seedWords}
-            onChange={(event) => setSeedWords(event.target.value)}
-            placeholder="Generated 24 words will appear here"
-          />
-
-          <div className="button-grid">
-            <button
-              onClick={() =>
-                void runAction("gen_seed", async () => {
-                  const response = await genSeed();
-                  setSeedWords(response.cipherSeedMnemonic.join(" "));
-                  return response;
-                })
-              }
-            >
-              GenSeed
-            </button>
-            <button onClick={() => void runAction("init_wallet", initWallet)}>
-              InitWallet
-            </button>
-            <button
-              onClick={() => void runAction("unlock_wallet", unlockWallet)}
-            >
-              UnlockWallet
-            </button>
-          </div>
-        </section>
-
-        <section className="panel">
-          <h2>Streams</h2>
-
-          <div className="panel-heading">
-            <span className="panel-note">
-              SubscribeState: {stateStreamActive ? "active" : "stopped"}
-            </span>
-          </div>
-          <div className="button-grid">
-            <button
-              onClick={() =>
-                void runAction("subscribe_state_start", startSubscribeState)
-              }
-            >
-              Start SubscribeState
-            </button>
-          </div>
-          <pre className="scrollbox">{lastStateSubscriptionEvent}</pre>
-
-          <label htmlFor="autoAcceptChannels">
-            <input
-              id="autoAcceptChannels"
-              type="checkbox"
-              checked={autoAcceptChannels}
-              onChange={(event) => setAutoAcceptChannels(event.target.checked)}
-            />{" "}
-            Auto-accept inbound channels
-          </label>
-
-          <div className="panel-heading">
-            <span className="panel-note">
-              ChannelAcceptor: {channelAcceptorActive ? "active" : "stopped"}
-            </span>
-          </div>
-          <div className="button-grid">
-            <button
-              onClick={() =>
-                void runAction("channel_acceptor_start", startChannelAcceptor)
-              }
-            >
-              Start ChannelAcceptor
-            </button>
-            <button
-              onClick={() =>
-                void runAction("channel_acceptor_stop", stopChannelAcceptor)
-              }
-            >
-              Stop ChannelAcceptor
-            </button>
-          </div>
-          <pre className="scrollbox">{lastChannelAcceptRequest}</pre>
-        </section>
-
-        <section className="panel">
-          <h2>Payments</h2>
-
-          <label htmlFor="invoiceMemo">Invoice memo</label>
-          <input
-            id="invoiceMemo"
-            value={invoiceMemo}
-            onChange={(event) => setInvoiceMemo(event.target.value)}
-            placeholder="Invoice memo"
-          />
-
-          <label htmlFor="invoiceAmountSat">Invoice amount (sat)</label>
-          <input
-            id="invoiceAmountSat"
-            value={invoiceAmountSat}
-            onChange={(event) => setInvoiceAmountSat(event.target.value)}
-            placeholder="1000"
-          />
-
-          <label htmlFor="paymentRequest">Payment request</label>
-          <textarea
-            id="paymentRequest"
-            value={paymentRequest}
-            onChange={(event) => setPaymentRequest(event.target.value)}
-            placeholder="lnbcrt..."
-          />
-
-          <div className="button-grid">
-            <button onClick={() => void runAction("add_invoice", addInvoice)}>
-              AddInvoice
-            </button>
-            <button
-              onClick={() => void runAction("decode_pay_req", decodePayReq)}
-            >
-              DecodePayReq
-            </button>
-            <button
-              onClick={() =>
-                void runAction("send_payment_sync", sendPaymentSync)
-              }
-            >
-              SendPaymentSync
-            </button>
-            <button
-              onClick={() => void runAction("lookup_invoice", lookupInvoice)}
-            >
-              LookupInvoice
-            </button>
-          </div>
-        </section>
-
-        <section className="panel">
-          <h2>Channels</h2>
-
-          <label htmlFor="channelPeerPubkey">Channel peer pubkey</label>
-          <input
-            id="channelPeerPubkey"
-            value={channelPeerPubkey}
-            onChange={(event) => setChannelPeerPubkey(event.target.value)}
-            placeholder="02..."
-          />
-
-          <label htmlFor="channelAmountSat">Channel amount (sat)</label>
-          <input
-            id="channelAmountSat"
-            value={channelAmountSat}
-            onChange={(event) => setChannelAmountSat(event.target.value)}
-            placeholder="20000"
-          />
-
-          <div className="button-grid">
-            <button
-              onClick={() =>
-                void runAction("open_channel_sync", openChannelSync)
-              }
-            >
-              OpenChannelSync
-            </button>
-            <button
-              onClick={() => void runAction("list_channels", listChannels)}
-            >
-              ListChannels
-            </button>
-          </div>
-        </section>
-
-        <section className="panel">
-          <h2>Peers</h2>
-
-          <label htmlFor="connectPeerTarget">Connect peer target</label>
-          <input
-            id="connectPeerTarget"
-            value={connectPeerTarget}
-            onChange={(event) => setConnectPeerTarget(event.target.value)}
-            placeholder="pubkey@127.0.0.1:9735"
-          />
-
-          <div className="button-grid">
-            <button onClick={() => void runAction("connect_peer", connectPeer)}>
-              ConnectPeer
-            </button>
-            <button onClick={() => void runAction("list_peers", listPeers)}>
-              ListPeers
-            </button>
-          </div>
-        </section>
+        <ResultPanel lastResult={lastResult} />
+        <LogPanel
+          logLines={logLines}
+          logScrollboxRef={logScrollboxRef}
+          onScroll={updateLogAutoScrollState}
+        />
+        <WalletPanel
+          seedPassphrase={seedPassphrase}
+          walletPassword={walletPassword}
+          seedWords={seedWords}
+          onSetSeedPassphrase={setSeedPassphrase}
+          onSetWalletPassword={setWalletPassword}
+          onSetSeedWords={setSeedWords}
+          onRunAction={runAction}
+          onGenSeed={async () => {
+            const response = await genSeed();
+            setSeedWords(response.cipherSeedMnemonic.join(" "));
+            return response;
+          }}
+          onInitWallet={initWallet}
+          onUnlockWallet={unlockWallet}
+        />
+        <LoadspeederPanel
+          loadspeederUrl={loadspeederUrl}
+          targetPath={DEFAULT_LOADSPEEDER_TARGET_PATH}
+          onSetLoadspeederUrl={setLoadspeederUrl}
+          onRunAction={runAction}
+          onRunLoadspeeder={runLoadspeeder}
+        />
+        <StreamsPanel
+          stateStreamActive={stateStreamActive}
+          channelAcceptorActive={channelAcceptorActive}
+          autoAcceptChannels={autoAcceptChannels}
+          lastStateSubscriptionEvent={lastStateSubscriptionEvent}
+          lastChannelAcceptRequest={lastChannelAcceptRequest}
+          onSetAutoAcceptChannels={setAutoAcceptChannels}
+          onRunAction={runAction}
+          onStartSubscribeState={startSubscribeState}
+          onStartChannelAcceptor={startChannelAcceptor}
+          onStopChannelAcceptor={stopChannelAcceptor}
+        />
+        <PaymentsPanel
+          invoiceMemo={invoiceMemo}
+          invoiceAmountSat={invoiceAmountSat}
+          paymentRequest={paymentRequest}
+          onSetInvoiceMemo={setInvoiceMemo}
+          onSetInvoiceAmountSat={setInvoiceAmountSat}
+          onSetPaymentRequest={setPaymentRequest}
+          onRunAction={runAction}
+          onAddInvoice={addInvoice}
+          onDecodePayReq={decodePayReq}
+          onSendPaymentSync={sendPaymentSync}
+          onLookupInvoice={lookupInvoice}
+        />
+        <ChannelsPanel
+          channelPeerPubkey={channelPeerPubkey}
+          channelAmountSat={channelAmountSat}
+          onSetChannelPeerPubkey={setChannelPeerPubkey}
+          onSetChannelAmountSat={setChannelAmountSat}
+          onRunAction={runAction}
+          onOpenChannelSync={openChannelSync}
+          onListChannels={listChannels}
+        />
+        <PeersPanel
+          connectPeerTarget={connectPeerTarget}
+          onSetConnectPeerTarget={setConnectPeerTarget}
+          onRunAction={runAction}
+          onConnectPeer={connectPeer}
+          onListPeers={listPeers}
+        />
       </div>
     </main>
   );

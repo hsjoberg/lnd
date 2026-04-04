@@ -5,7 +5,11 @@ import mkcert from "vite-plugin-mkcert";
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), mkcert()],
+  plugins: [
+    react(),
+    // Disable for http (i.e testing \w regtest)
+    mkcert(),
+  ],
   resolve: {
     alias: [
       {
@@ -36,6 +40,7 @@ export default defineConfig({
         fileURLToPath(new URL("../runtime", import.meta.url)),
       ],
     },
+    // Disable for http (i.e testing \w regtest)
     https: {},
   },
 });

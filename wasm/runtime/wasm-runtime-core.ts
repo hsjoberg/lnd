@@ -133,8 +133,11 @@ export function createGlobalWasmBackend(
 
       if (!wasmLoadPromise) {
         wasmLoadPromise = (async () => {
-          // fs_backends.js populates the Node-style shims and stdout hooks that
-          // the Go wasm runtime expects before wasm_exec.js starts.
+          // The FS backend files register the concrete filesystem factories,
+          // then fs_backends.js installs the shared Node-style shims and
+          // prepare hook that wasm_exec.js expects.
+          await loadScriptOnce(`${assetRoot}/fs_mem_backend.js`);
+          await loadScriptOnce(`${assetRoot}/fs_opfs_backend.js`);
           await loadScriptOnce(`${assetRoot}/fs_backends.js`);
 
           if (!runtime.__lndWasmPrepareFS) {

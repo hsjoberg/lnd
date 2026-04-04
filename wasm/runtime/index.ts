@@ -36,6 +36,10 @@ export async function loadWasmRuntime(
   return result;
 }
 
+export function hasLoadedWasmRuntime() {
+  return activeRuntimeMode !== null;
+}
+
 export function attachStdoutListener(
   onLine: (line: string) => void,
   runtimeMode: RuntimeMode,

@@ -91,3 +91,5 @@ wasm/build
 wasm/backend/*_registry_generated.go
 wasm/demo/public/wasm/lndmobile.wasm
 wasm/demo/public/wasm/fs_backends.js
+wasm/demo/public/wasm/fs_mem_backend.js
+wasm/demo/public/wasm/fs_opfs_backend.js
