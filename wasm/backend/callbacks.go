@@ -72,6 +72,11 @@ type jsProtoJSONCallback struct {
 	onError     js.Value
 }
 
+type jsStringCallback struct {
+	onResponse js.Value
+	onError    js.Value
+}
+
 func (c *jsProtoJSONCallback) OnResponse(data []byte) {
 	resp := c.newResponse()
 	if err := protov2.Unmarshal(data, resp); err != nil {
@@ -92,6 +97,14 @@ func (c *jsProtoJSONCallback) OnResponse(data []byte) {
 }
 
 func (c *jsProtoJSONCallback) OnError(err error) {
+	c.onError.Invoke(err.Error())
+}
+
+func (c *jsStringCallback) OnResponse(data []byte) {
+	c.onResponse.Invoke(string(data))
+}
+
+func (c *jsStringCallback) OnError(err error) {
 	c.onError.Invoke(err.Error())
 }
 

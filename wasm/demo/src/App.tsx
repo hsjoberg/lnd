@@ -72,12 +72,12 @@ import type { UnlockWalletResponse } from "react-native-turbo-lnd/protos/walletu
 import "./App.css";
 import {
   ChannelsPanel,
-  LoadspeederPanel,
   LogPanel,
   PaymentsPanel,
   PeersPanel,
   ResultPanel,
   RuntimePanel,
+  SpeedloaderPanel,
   StreamsPanel,
   WalletPanel,
 } from "./demo-panels";
@@ -86,9 +86,9 @@ import {
   bytesToBase64,
   DEFAULT_EXTRA_ARGS,
   DEFAULT_LND_CONF,
-  DEFAULT_LOADSPEEDER_TARGET_PATH,
-  DEFAULT_LOADSPEEDER_URL,
-  downloadFileToOPFS,
+  DEFAULT_SPEEDLOADER_CACHE_DIR,
+  DEFAULT_SPEEDLOADER_DATA_DIR,
+  DEFAULT_SPEEDLOADER_SERVICE_URL,
   encodeBytes,
   formatDurationMs,
   hexToBytes,
@@ -105,9 +105,11 @@ import {
   attachStdoutListener,
   hasLoadedWasmRuntime,
   getWasmStatus,
+  gossipSync,
   loadWasmRuntime,
   openBidiStream,
   openServerStream,
+  cancelGossipSync,
   startWasm,
   type FsBackend,
   type RuntimeMode,
@@ -118,7 +120,15 @@ function App() {
   const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("worker");
   const [extraArgs, setExtraArgs] = useState(DEFAULT_EXTRA_ARGS);
   const [lndConf, setLndConf] = useState(DEFAULT_LND_CONF);
-  const [loadspeederUrl, setLoadspeederUrl] = useState(DEFAULT_LOADSPEEDER_URL);
+  const [speedloaderServiceUrl, setSpeedloaderServiceUrl] = useState(
+    DEFAULT_SPEEDLOADER_SERVICE_URL,
+  );
+  const [speedloaderCacheDir, setSpeedloaderCacheDir] = useState(
+    DEFAULT_SPEEDLOADER_CACHE_DIR,
+  );
+  const [speedloaderDataDir, setSpeedloaderDataDir] = useState(
+    DEFAULT_SPEEDLOADER_DATA_DIR,
+  );
   const [seedPassphrase, setSeedPassphrase] = useState("");
   const [walletPassword, setWalletPassword] = useState("password123");
   const [seedWords, setSeedWords] = useState("");
@@ -299,29 +309,42 @@ function App() {
     return { ok: true };
   }
 
-  async function runLoadspeeder() {
-    if (fsBackend !== "opfs") {
-      throw new Error("loadspeeder currently requires the OPFS backend");
+  async function runSpeedloader() {
+    if (!hasLoadedWasmRuntime()) {
+      throw new Error("speedloader requires wasm to be loaded first");
     }
 
-    if (hasLoadedWasmRuntime() && getWasmStatus()) {
-      throw new Error("loadspeeder requires lnd to be stopped");
+    if (getWasmStatus()) {
+      throw new Error("speedloader requires lnd to be stopped");
     }
 
-    const url = loadspeederUrl.trim();
-    if (!url) {
-      throw new Error("missing loadspeeder URL");
+    const serviceUrl = speedloaderServiceUrl.trim();
+    const cacheDir = speedloaderCacheDir.trim();
+    const dataDir = speedloaderDataDir.trim();
+    if (!serviceUrl || !cacheDir || !dataDir) {
+      throw new Error("speedloader requires service URL, cache dir, and data dir");
     }
 
-    const targetPath = DEFAULT_LOADSPEEDER_TARGET_PATH;
-    appendLog(`loadspeeder downloading ${url}`);
-    const bytes = await downloadFileToOPFS(url, targetPath);
-    appendLog(`loadspeeder wrote ${targetPath}`);
+    appendLog(`speedloader syncing from ${serviceUrl}`);
+    const result = await gossipSync(serviceUrl, cacheDir, dataDir);
+    appendLog(`speedloader result: ${result}`);
+
     return {
-      url,
-      target_path: targetPath,
-      bytes,
+      service_url: serviceUrl,
+      cache_dir: cacheDir,
+      data_dir: dataDir,
+      result,
     };
+  }
+
+  async function runCancelSpeedloader() {
+    if (!hasLoadedWasmRuntime()) {
+      throw new Error("speedloader requires wasm to be loaded first");
+    }
+
+    cancelGossipSync();
+    appendLog("speedloader cancel requested");
+    return { cancelled: true };
   }
 
   async function getState() {
@@ -740,13 +763,6 @@ function App() {
           onInitWallet={initWallet}
           onUnlockWallet={unlockWallet}
         />
-        <LoadspeederPanel
-          loadspeederUrl={loadspeederUrl}
-          targetPath={DEFAULT_LOADSPEEDER_TARGET_PATH}
-          onSetLoadspeederUrl={setLoadspeederUrl}
-          onRunAction={runAction}
-          onRunLoadspeeder={runLoadspeeder}
-        />
         <StreamsPanel
           stateStreamActive={stateStreamActive}
           channelAcceptorActive={channelAcceptorActive}
@@ -787,6 +803,17 @@ function App() {
           onRunAction={runAction}
           onConnectPeer={connectPeer}
           onListPeers={listPeers}
+        />
+        <SpeedloaderPanel
+          serviceUrl={speedloaderServiceUrl}
+          cacheDir={speedloaderCacheDir}
+          dataDir={speedloaderDataDir}
+          onSetServiceUrl={setSpeedloaderServiceUrl}
+          onSetCacheDir={setSpeedloaderCacheDir}
+          onSetDataDir={setSpeedloaderDataDir}
+          onRunAction={runAction}
+          onRunSpeedloader={runSpeedloader}
+          onCancelSpeedloader={runCancelSpeedloader}
         />
       </div>
     </main>

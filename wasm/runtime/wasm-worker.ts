@@ -127,6 +127,20 @@ self.addEventListener("message", async (event: MessageEvent<RequestMessage>) => 
         await backend.startWasm(message.extraArgs);
         respondSuccess(message.requestId);
         return;
+      case "gossipSync":
+        respondSuccess(
+          message.requestId,
+          await backend.gossipSync(
+            message.serviceUrl,
+            message.cacheDir,
+            message.dataDir,
+          ),
+        );
+        return;
+      case "cancelGossipSync":
+        backend.cancelGossipSync();
+        respondSuccess(message.requestId);
+        return;
       case "getStatus":
         respondSuccess(message.requestId, backend.getWasmStatus());
         return;

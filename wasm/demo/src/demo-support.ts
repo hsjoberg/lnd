@@ -9,11 +9,12 @@ export const DEFAULT_EXTRA_ARGS =
 
 export const DEFAULT_LND_CONF = ``;
 
-export const DEFAULT_LOADSPEEDER_URL =
-  "https://primer.blixtwallet.com/mainnet/graph/graph-001d.db";
+export const DEFAULT_SPEEDLOADER_SERVICE_URL =
+  "https://primer.blixtwallet.com";
 
-export const DEFAULT_LOADSPEEDER_TARGET_PATH =
-  "/lnd/data/graph/mainnet/graph.db";
+export const DEFAULT_SPEEDLOADER_CACHE_DIR = "/lnd/speedloader-cache";
+
+export const DEFAULT_SPEEDLOADER_DATA_DIR = "/lnd";
 
 const encoder = new TextEncoder();
 

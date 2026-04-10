@@ -50,6 +50,14 @@ type WasmGlobal = typeof globalThis & {
     | string
     | null
     | undefined;
+  lndWasmGossipSync?: (
+    serviceUrl: string,
+    cacheDir: string,
+    dataDir: string,
+    onSuccess: (result: string) => void,
+    onError: (error: string) => void,
+  ) => string | null | undefined;
+  lndWasmCancelGossipSync?: () => void;
 };
 
 export type BidiStreamHandle = {
@@ -78,6 +86,12 @@ export type WasmRuntimeBackend = {
     onResponse: (responseBytes: Uint8Array) => void,
     onError: (error: string) => void,
   ): BidiStreamHandle;
+  gossipSync(
+    serviceUrl: string,
+    cacheDir: string,
+    dataDir: string,
+  ): Promise<string>;
+  cancelGossipSync(): void;
 };
 
 type GlobalBackendOptions = {
@@ -270,6 +284,32 @@ export function createGlobalWasmBackend(
           }
         },
       };
+    },
+
+    async gossipSync(serviceUrl, cacheDir, dataDir) {
+      const loaded = ensureWasmLoaded();
+      if (!loaded.lndWasmGossipSync) {
+        throw new Error("speedloader is not available");
+      }
+
+      return callbackToPromise<string>((resolve, reject) =>
+        loaded.lndWasmGossipSync!(
+          serviceUrl,
+          cacheDir,
+          dataDir,
+          resolve,
+          reject,
+        ),
+      );
+    },
+
+    cancelGossipSync() {
+      const loaded = ensureWasmLoaded();
+      if (!loaded.lndWasmCancelGossipSync) {
+        throw new Error("speedloader is not available");
+      }
+
+      loaded.lndWasmCancelGossipSync();
     },
   };
 }

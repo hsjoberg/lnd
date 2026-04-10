@@ -63,10 +63,13 @@ func registerWasmAPI() {
 	//   - lndWasmInvokeRPC(method, requestBytes, successCb, errorCb)
 	//   - lndWasmOpenServerStream(method, requestBytes, successCb, errorCb)
 	//   - lndWasmOpenBidiStream(method, successCb, errorCb)
+	//   - lndWasmGossipSync(serviceUrl, cacheDir, dataDir, successCb, errorCb)
+	//   - lndWasmCancelGossipSync()
 	registerStartAPI()
 	registerUnaryAPI()
 	registerServerStreamAPI()
 	registerBidiStreamAPI()
+	registerSpeedloaderAPI()
 }
 
 func Main() {

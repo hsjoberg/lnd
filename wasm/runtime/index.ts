@@ -81,4 +81,16 @@ export function openBidiStream(
   return getActiveBackend().openBidiStream(method, onResponse, onError);
 }
 
+export function gossipSync(
+  serviceUrl: string,
+  cacheDir: string,
+  dataDir: string,
+) {
+  return getActiveBackend().gossipSync(serviceUrl, cacheDir, dataDir);
+}
+
+export function cancelGossipSync() {
+  return getActiveBackend().cancelGossipSync();
+}
+
 export type { FsBackend, RuntimeMode };

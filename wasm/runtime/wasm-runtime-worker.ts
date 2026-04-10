@@ -179,6 +179,23 @@ export function getWorkerWasmBackend(): WasmRuntimeBackend {
       return cachedStatus;
     },
 
+    gossipSync(serviceUrl, cacheDir, dataDir) {
+      return sendRequest<string>({
+        type: "gossipSync",
+        requestId: 0,
+        serviceUrl,
+        cacheDir,
+        dataDir,
+      });
+    },
+
+    cancelGossipSync() {
+      void sendRequest<void>({
+        type: "cancelGossipSync",
+        requestId: 0,
+      });
+    },
+
     async invokeRpc(method, requestBytes) {
       const response = await sendRequest<Uint8Array>({
         type: "invokeRpc",

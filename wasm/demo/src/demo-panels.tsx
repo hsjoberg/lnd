@@ -261,36 +261,58 @@ export function WalletPanel(props: WalletPanelProps) {
   );
 }
 
-type LoadspeederPanelProps = {
-  loadspeederUrl: string;
-  targetPath: string;
-  onSetLoadspeederUrl: (value: string) => void;
+type SpeedloaderPanelProps = {
+  serviceUrl: string;
+  cacheDir: string;
+  dataDir: string;
+  onSetServiceUrl: (value: string) => void;
+  onSetCacheDir: (value: string) => void;
+  onSetDataDir: (value: string) => void;
   onRunAction: RunAction;
-  onRunLoadspeeder: () => Promise<unknown>;
+  onRunSpeedloader: () => Promise<unknown>;
+  onCancelSpeedloader: () => Promise<unknown>;
 };
 
-export function LoadspeederPanel(props: LoadspeederPanelProps) {
+export function SpeedloaderPanel(props: SpeedloaderPanelProps) {
   return (
     <section className="panel">
       <div className="panel-heading">
-        <h2>Loadspeeder</h2>
-        <span className="panel-note">downloads the graph DB before startup</span>
+        <h2>Speedloader</h2>
+        <span className="panel-note">runs mobile GossipSync before startup</span>
       </div>
 
-      <label htmlFor="loadspeederUrl">Graph DB URL</label>
+      <label htmlFor="speedloaderServiceUrl">Service URL</label>
       <input
-        id="loadspeederUrl"
-        value={props.loadspeederUrl}
-        onChange={(event) => props.onSetLoadspeederUrl(event.target.value)}
-        placeholder="https://primer.blixtwallet.com/mainnet/graph/graph-001d.db"
+        id="speedloaderServiceUrl"
+        value={props.serviceUrl}
+        onChange={(event) => props.onSetServiceUrl(event.target.value)}
+        placeholder="https://primer.blixtwallet.com"
       />
 
-      <label htmlFor="loadspeederTargetPath">Target graph DB path</label>
-      <input id="loadspeederTargetPath" value={props.targetPath} readOnly />
+      <label htmlFor="speedloaderCacheDir">Cache dir</label>
+      <input
+        id="speedloaderCacheDir"
+        value={props.cacheDir}
+        onChange={(event) => props.onSetCacheDir(event.target.value)}
+      />
 
+      <label htmlFor="speedloaderDataDir">Data dir</label>
+      <input
+        id="speedloaderDataDir"
+        value={props.dataDir}
+        onChange={(event) => props.onSetDataDir(event.target.value)}
+      />
       <div className="button-grid">
-        <button onClick={() => void props.onRunAction("loadspeeder", props.onRunLoadspeeder)}>
-          Loadspeeder
+        <button onClick={() => void props.onRunAction("speedloader", props.onRunSpeedloader)}>
+          GossipSync
+        </button>
+        <button
+          className="alt"
+          onClick={() =>
+            void props.onRunAction("cancel_speedloader", props.onCancelSpeedloader)
+          }
+        >
+          Cancel
         </button>
       </div>
     </section>

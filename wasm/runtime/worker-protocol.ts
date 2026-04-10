@@ -9,6 +9,14 @@ export type RequestMessage =
   | { type: "start"; requestId: number; extraArgs: string }
   | { type: "getStatus"; requestId: number }
   | {
+      type: "gossipSync";
+      requestId: number;
+      serviceUrl: string;
+      cacheDir: string;
+      dataDir: string;
+    }
+  | { type: "cancelGossipSync"; requestId: number }
+  | {
       type: "invokeRpc";
       requestId: number;
       method: string;

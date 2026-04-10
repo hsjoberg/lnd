@@ -29,7 +29,7 @@ func setStartHook() {
 
 func getStatus() int32 {
 	cb := &statusCallback{}
-	lndmobile.GetStatus(cb)
+	lndmobile.ServiceStatus(cb)
 	return cb.value
 }
 
