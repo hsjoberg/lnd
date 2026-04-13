@@ -33,7 +33,22 @@ CGO_ANDROID_BUILD_DIR := $(CGO_BUILD_DIR)/android
 ANDROID_CLANG_FINDER = $(PWD)/mobile/ndk-clang-finder.sh
 CGO_LINUX_BUILD_DIR := $(CGO_BUILD_DIR)/linux
 CGO_IOS_BUILD_DIR := $(CGO_BUILD_DIR)/ios
+CGO_IOS_XCFRAMEWORK := $(CGO_IOS_BUILD_DIR)/Lndmobile.xcframework
+CGO_IOS_XCFRAMEWORK_STAGE_DIR := $(CGO_IOS_BUILD_DIR)/xcframework
+CGO_IOS_DEVICE_XCFRAMEWORK_DIR := $(CGO_IOS_XCFRAMEWORK_STAGE_DIR)/device
+CGO_IOS_DEVICE_XCFRAMEWORK_HEADERS := $(CGO_IOS_DEVICE_XCFRAMEWORK_DIR)/Headers
+CGO_IOS_SIMULATOR_XCFRAMEWORK_DIR := $(CGO_IOS_XCFRAMEWORK_STAGE_DIR)/simulator
+CGO_IOS_SIMULATOR_XCFRAMEWORK_HEADERS := $(CGO_IOS_SIMULATOR_XCFRAMEWORK_DIR)/Headers
+# Keep device and simulator builds in different Go caches. Both device and
+# Apple Silicon simulator builds use GOOS=ios GOARCH=arm64, but cgo uses
+# different SDK/toolchain flags underneath. Sharing one cache can cause the
+# simulator archive to reuse device-tagged objects.
+CGO_IOS_DEVICE_GOCACHE := $(CGO_IOS_BUILD_DIR)/gocache/device
+CGO_IOS_SIMULATOR_GOCACHE := $(CGO_IOS_BUILD_DIR)/gocache/simulator
 CGO_MACOS_BUILD_DIR := $(CGO_BUILD_DIR)/macos
+CGO_MACOS_XCFRAMEWORK := $(CGO_MACOS_BUILD_DIR)/Lndmobile.xcframework
+CGO_MACOS_XCFRAMEWORK_STAGE_DIR := $(CGO_MACOS_BUILD_DIR)/xcframework
+CGO_MACOS_XCFRAMEWORK_HEADERS := $(CGO_MACOS_XCFRAMEWORK_STAGE_DIR)/Headers
 
 COMMIT := $(shell git describe --tags --dirty)
 
@@ -534,21 +549,55 @@ android-cgo: mobile-rpc mobile-cgo-mode
 
 #? ios-cgo: Build CGO .a lib for iOS
 ios-cgo: mobile-rpc mobile-cgo-mode
-	@$(call print, "Building c-archived .a libs ($(CGO_IOS_BUILD_DIR)).")
-	mkdir -p $(CGO_IOS_BUILD_DIR)
-	CGO_ENABLED=1 GOOS=ios GOARCH=arm64 SDK=iphoneos CC=$(PWD)/mobile/clangwrap.sh CGO_CFLAGS="-fembed-bitcode" CGO_LDFLAGS="-lresolv" $(GOBUILD) -buildmode=c-archive -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -v -o "$(CGO_IOS_BUILD_DIR)/liblnd-arm64.a" $(MOBILE_PKG)
-	CGO_ENABLED=1 GOOS=ios GOARCH=amd64 SDK=iphonesimulator CC=$(PWD)/mobile/clangwrap.sh CGO_CFLAGS="-fembed-bitcode" CGO_LDFLAGS="-lresolv" $(GOBUILD) -buildmode=c-archive -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -v -o "$(CGO_IOS_BUILD_DIR)/liblnd-simulator-amd64.a" $(MOBILE_PKG)
-	lipo $(CGO_IOS_BUILD_DIR)/liblnd-arm64.a $(CGO_IOS_BUILD_DIR)/liblnd-simulator-amd64.a -create -output $(CGO_IOS_BUILD_DIR)/liblnd-fat.a
+	@$(call print, "Building c-archived .a libs and xcframework ($(CGO_IOS_XCFRAMEWORK)).")
+	mkdir -p $(CGO_IOS_BUILD_DIR) $(CGO_IOS_DEVICE_GOCACHE) $(CGO_IOS_SIMULATOR_GOCACHE) \
+		$(CGO_IOS_DEVICE_XCFRAMEWORK_HEADERS) $(CGO_IOS_SIMULATOR_XCFRAMEWORK_HEADERS)
+	GOCACHE="$(CGO_IOS_DEVICE_GOCACHE)" CGO_ENABLED=1 GOOS=ios GOARCH=arm64 SDK=iphoneos CC=$(PWD)/mobile/clangwrap.sh CGO_CFLAGS="-fembed-bitcode" CGO_LDFLAGS="-lresolv" $(GOBUILD) -buildmode=c-archive -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -v -o "$(CGO_IOS_BUILD_DIR)/liblnd-arm64.a" $(MOBILE_PKG)
+	GOCACHE="$(CGO_IOS_SIMULATOR_GOCACHE)" CGO_ENABLED=1 GOOS=ios GOARCH=arm64 SDK=iphonesimulator CC=$(PWD)/mobile/clangwrap.sh CGO_CFLAGS="-fembed-bitcode" CGO_LDFLAGS="-lresolv" $(GOBUILD) -buildmode=c-archive -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -v -o "$(CGO_IOS_BUILD_DIR)/liblnd-simulator-arm64.a" $(MOBILE_PKG)
+	GOCACHE="$(CGO_IOS_SIMULATOR_GOCACHE)" CGO_ENABLED=1 GOOS=ios GOARCH=amd64 SDK=iphonesimulator CC=$(PWD)/mobile/clangwrap.sh CGO_CFLAGS="-fembed-bitcode" CGO_LDFLAGS="-lresolv" $(GOBUILD) -buildmode=c-archive -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -v -o "$(CGO_IOS_BUILD_DIR)/liblnd-simulator-amd64.a" $(MOBILE_PKG)
+	lipo -create \
+		-output "$(CGO_IOS_BUILD_DIR)/liblnd-simulator.a" \
+		"$(CGO_IOS_BUILD_DIR)/liblnd-simulator-arm64.a" \
+		"$(CGO_IOS_BUILD_DIR)/liblnd-simulator-amd64.a"
+	cp "$(CGO_IOS_BUILD_DIR)/liblnd-simulator-arm64.h" \
+		"$(CGO_IOS_BUILD_DIR)/liblnd-simulator.h"
 	cp $(CGO_IOS_BUILD_DIR)/liblnd-arm64.h $(CGO_IOS_BUILD_DIR)/liblnd.h
+	cp "$(CGO_IOS_BUILD_DIR)/liblnd-arm64.a" \
+		"$(CGO_IOS_DEVICE_XCFRAMEWORK_DIR)/liblnd.a"
+	cp "$(CGO_IOS_BUILD_DIR)/liblnd-arm64.h" \
+		"$(CGO_IOS_DEVICE_XCFRAMEWORK_HEADERS)/liblnd.h"
+	cp "$(CGO_IOS_BUILD_DIR)/liblnd-simulator.a" \
+		"$(CGO_IOS_SIMULATOR_XCFRAMEWORK_DIR)/liblnd.a"
+	cp "$(CGO_IOS_BUILD_DIR)/liblnd-simulator.h" \
+		"$(CGO_IOS_SIMULATOR_XCFRAMEWORK_HEADERS)/liblnd.h"
+	rm -rf "$(CGO_IOS_XCFRAMEWORK)"
+	xcodebuild -create-xcframework \
+		-library "$(CGO_IOS_DEVICE_XCFRAMEWORK_DIR)/liblnd.a" \
+		-headers "$(CGO_IOS_DEVICE_XCFRAMEWORK_HEADERS)" \
+		-library "$(CGO_IOS_SIMULATOR_XCFRAMEWORK_DIR)/liblnd.a" \
+		-headers "$(CGO_IOS_SIMULATOR_XCFRAMEWORK_HEADERS)" \
+		-output "$(CGO_IOS_XCFRAMEWORK)"
+	rm -rf "$(CGO_IOS_XCFRAMEWORK_STAGE_DIR)" \
+		"$(CGO_IOS_BUILD_DIR)/gocache"
 
 #? macos-cgo: Build CGO .a lib for macOS
 macos-cgo: mobile-rpc mobile-cgo-mode
-	@$(call print, "Building c-archived .a libs ($(CGO_MACOS_BUILD_DIR)).")
-	mkdir -p $(CGO_MACOS_BUILD_DIR)
+	@$(call print, "Building c-archived .a libs and xcframework ($(CGO_MACOS_XCFRAMEWORK)).")
+	mkdir -p $(CGO_MACOS_BUILD_DIR) $(CGO_MACOS_XCFRAMEWORK_HEADERS)
 	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 CGO_CFLAGS="-fembed-bitcode" $(GOBUILD) -buildmode=c-archive -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -v -o $(CGO_MACOS_BUILD_DIR)/liblnd-arm64.a $(MOBILE_PKG)
 	CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 CGO_CFLAGS="-fembed-bitcode" $(GOBUILD) -buildmode=c-archive -tags="mobile $(DEV_TAGS) $(RPC_TAGS)" -ldflags "$(RELEASE_LDFLAGS)" -v -o $(CGO_MACOS_BUILD_DIR)/liblnd-amd64.a $(MOBILE_PKG)
 	lipo $(CGO_MACOS_BUILD_DIR)/liblnd-arm64.a $(CGO_MACOS_BUILD_DIR)/liblnd-amd64.a -create -output $(CGO_MACOS_BUILD_DIR)/liblnd-fat.a
 	cp $(CGO_MACOS_BUILD_DIR)/liblnd-arm64.h $(CGO_MACOS_BUILD_DIR)/liblnd.h
+	cp "$(CGO_MACOS_BUILD_DIR)/liblnd-fat.a" \
+		"$(CGO_MACOS_XCFRAMEWORK_STAGE_DIR)/liblnd.a"
+	cp "$(CGO_MACOS_BUILD_DIR)/liblnd.h" \
+		"$(CGO_MACOS_XCFRAMEWORK_HEADERS)/liblnd.h"
+	rm -rf "$(CGO_MACOS_XCFRAMEWORK)"
+	xcodebuild -create-xcframework \
+		-library "$(CGO_MACOS_XCFRAMEWORK_STAGE_DIR)/liblnd.a" \
+		-headers "$(CGO_MACOS_XCFRAMEWORK_HEADERS)" \
+		-output "$(CGO_MACOS_XCFRAMEWORK)"
+	rm -rf "$(CGO_MACOS_XCFRAMEWORK_STAGE_DIR)"
 
 #? macos-cgo-shared: Build CGO .dylib lib for macOS
 macos-cgo-shared: mobile-rpc mobile-cgo-mode

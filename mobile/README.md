@@ -244,25 +244,36 @@ Run `make ios-cgo`
 ```
 mobile/build/cgo
 └── ios
+    ├── Lndmobile.xcframework
     ├── liblnd-arm64.a
     ├── liblnd-arm64.h
-    ├── liblnd-fat.a
+    ├── liblnd-simulator.a
+    ├── liblnd-simulator.h
     ├── liblnd-simulator-amd64.a
     ├── liblnd-simulator-amd64.h
+    ├── liblnd-simulator-arm64.a
+    ├── liblnd-simulator-arm64.h
     └── liblnd.h
 ```
 
-liblnd-fat.a is a universal binary for both ARM64 and AMD64. To use lnd in your
-iOS project, rename liblnd-fat.a to liblnd.a, and then drag in
-liblnd.a and liblnd.h into your Xcode project.
+`make ios-cgo` packages the device and simulator builds into
+`mobile/build/cgo/ios/Lndmobile.xcframework`.
+
+Use `Lndmobile.xcframework` in Xcode. The device slice is `arm64`, and the
+simulator slice contains both `arm64` and `x86_64`.
+
+If you integrate the static libraries manually instead of using the
+XCFramework, use `liblnd-arm64.a` for device builds and `liblnd-simulator.a`
+for simulator builds.
 
 ## macOS
 
-Run `make ios-cgo`
+Run `make macos-cgo`
 
 ```
 mobile/build/cgo
 └── macos
+    ├── Lndmobile.xcframework
     ├── liblnd-amd64.a
     ├── liblnd-amd64.h
     ├── liblnd-arm64.a
@@ -271,9 +282,14 @@ mobile/build/cgo
     └── liblnd.h
 ```
 
-liblnd-fat.a is a universal binary for both ARM64 and AMD64. To use lnd in your
-macOS project, rename liblnd-fat.a to liblnd.a, and then drag in
-liblnd.a and liblnd.h into your Xcode project.
+`make macos-cgo` packages the universal macOS archive into
+`mobile/build/cgo/macos/Lndmobile.xcframework`.
+
+Use `Lndmobile.xcframework` in Xcode. Its macOS slice contains both `arm64`
+and `x86_64`.
+
+If you integrate the static library manually instead of using the XCFramework,
+use `liblnd-fat.a` together with `liblnd.h`.
 
 
 ## Android
