@@ -479,15 +479,21 @@ func downloadGraph(cacheDir string, dgraphPath string, log *Logger, breezURL str
 
 func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType string, callback Callback) {
 	var (
-		firstRun      bool
-		useDGraph     bool
-		dgraphPath    = cacheDir + "/dgraph/channel.db"
-		logPath       = cacheDir + "/log/speedloader.log"
-		usagePath     = cacheDir + "/usage/channel.db"
-		breezURL      = serviceUrl + "/mainnet/graph/graph-001d.db"
-		patchURL      = serviceUrl + "/mainnet/graph/"
-		checksumURL   = serviceUrl + "/mainnet/graph/MD5SUMS"
-		checksumValue string
+		firstRun          bool
+		useDGraph         bool
+		dgraphPath        = cacheDir + "/dgraph/channel.db"
+		logPath           = cacheDir + "/log/speedloader.log"
+		usagePath         = cacheDir + "/usage/channel.db"
+		breezURL          = serviceUrl + "/mainnet/graph/graph-001d.db"
+		patchURL          = serviceUrl + "/mainnet/graph/"
+		checksumURL       = serviceUrl + "/mainnet/graph/MD5SUMS"
+		checksumValue     string
+		totalStart        = time.Now()
+		downloadDur       time.Duration
+		checksumVerifyDur time.Duration
+		copyUsageDur      time.Duration
+		mergeDur          time.Duration
+		commitDur         time.Duration
 	)
 
 	initDirs(cacheDir)
@@ -729,11 +735,16 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 		// if the dgraph is not usable, download the graph
 		if !useDGraph {
 			// download the breez gossip database
+			downloadStart := time.Now()
 			err = downloadGraph(cacheDir, dgraphPath, log, breezURL)
 			if err != nil {
 				callback.OnError(err)
 				return
 			}
+			downloadDur += time.Since(downloadStart)
+			log.Printf("downloadGraph took %s", downloadDur)
+
+			checksumStart := time.Now()
 			fh, err := os.Open(dgraphPath)
 			if err != nil {
 				callback.OnError(err)
@@ -763,6 +774,8 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 			} else {
 				log.Printf("Checksum OK %s", calculatedChecksum)
 			}
+			checksumVerifyDur += time.Since(checksumStart)
+			log.Printf("download checksum verification took %s", checksumVerifyDur)
 		}
 		// open channel.db as dest
 		service, release, err := serviceRefCounter.Get(
@@ -790,7 +803,14 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 		destDB := serviceStruct.chanDB
 		destGraphDB := serviceStruct.graphDB
 		// temporarily copy dgraph to usage dir
+		copyStart := time.Now()
 		err = copyFile(dgraphPath, usagePath, log)
+		copyUsageDur += time.Since(copyStart)
+		log.Printf("copyFile to usage DB took %s", copyUsageDur)
+		if err != nil {
+			callback.OnError(err)
+			return
+		}
 		// open dgraph.db as source
 		sourceBackend, err := kvdb.GetBoltBackend(&kvdb.BoltBackendConfig{
 			DBPath:         cacheDir + "/usage",
@@ -875,12 +895,15 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 				return
 			}
 		}
+		mergeStart := time.Now()
 		err = merge(tx, sourceDB,
 			func(keyPath [][]byte, k []byte, v []byte) bool {
 				pathElements := extractPathElements(keyPath, k)
 				_, shouldCopy := bucketsToCopy[pathElements[0]]
 				return !shouldCopy
 			}, log)
+		mergeDur += time.Since(mergeStart)
+		log.Printf("merge into destination DB took %s", mergeDur)
 		if err != nil {
 			callback.OnError(err)
 			return
@@ -900,7 +923,25 @@ func GossipSync(serviceUrl string, cacheDir string, dataDir string, networkType 
 			return
 		}
 		log.Printf("Done")
-		callback.OnResponse([]byte(fmt.Sprintf("dl=%t,done_commit_err=%v", !useDGraph, tx.Commit())))
+		commitStart := time.Now()
+		commitErr := tx.Commit()
+		commitDur += time.Since(commitStart)
+		totalDur := time.Since(totalStart)
+		log.Printf(
+			"GossipSync timing summary: download=%s checksum=%s copy=%s merge=%s commit=%s total=%s",
+			downloadDur, checksumVerifyDur, copyUsageDur, mergeDur, commitDur, totalDur,
+		)
+		callback.OnResponse([]byte(fmt.Sprintf(
+			"dl=%t,download_ms=%d,checksum_ms=%d,copy_ms=%d,merge_ms=%d,commit_ms=%d,total_ms=%d,done_commit_err=%v",
+			!useDGraph,
+			downloadDur.Milliseconds(),
+			checksumVerifyDur.Milliseconds(),
+			copyUsageDur.Milliseconds(),
+			mergeDur.Milliseconds(),
+			commitDur.Milliseconds(),
+			totalDur.Milliseconds(),
+			commitErr,
+		)))
 	}
 }
 
