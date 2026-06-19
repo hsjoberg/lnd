@@ -25,6 +25,7 @@ import (
 	graphdb "github.com/lightningnetwork/lnd/graph/db"
 	"github.com/lightningnetwork/lnd/graph/db/models"
 	"github.com/lightningnetwork/lnd/kvdb"
+	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/routing/route"
 	"go.etcd.io/bbolt"
 )
@@ -248,7 +249,8 @@ type walkFunc func(keys [][]byte, k, v []byte, seq uint64) error
 type skipFunc func(keys [][]byte, k, v []byte) bool
 
 func ourNode(graphDB *graphdb.ChannelGraph) (*models.Node, error) {
-	node, err := graphDB.SourceNode(globalCtx)
+	v1Graph := graphdb.NewVersionedGraph(graphDB, lnwire.GossipVersion1)
+	node, err := v1Graph.SourceNode(globalCtx)
 	if err == graphdb.ErrSourceNodeNotSet || err == graphdb.ErrGraphNotFound {
 		return nil, nil
 	}
@@ -269,7 +271,10 @@ func ourData(graphDB *graphdb.ChannelGraph, ourNode *models.Node, log *Logger) (
 		return nodes, edges, policies, globalCtx.Err()
 	default:
 		nodeVertex := route.Vertex(ourNode.PubKeyBytes)
-		err := graphDB.ForEachNodeChannel(globalCtx, nodeVertex, func(
+		v1Graph := graphdb.NewVersionedGraph(
+			graphDB, lnwire.GossipVersion1,
+		)
+		err := v1Graph.ForEachNodeChannel(globalCtx, nodeVertex, func(
 			channelEdgeInfo *models.ChannelEdgeInfo,
 			toPolicy *models.ChannelEdgePolicy,
 			fromPolicy *models.ChannelEdgePolicy) error {
