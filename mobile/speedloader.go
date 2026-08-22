@@ -282,9 +282,8 @@ func ourData(graphDB *graphdb.ChannelGraph, ourNode *models.Node, log *Logger) (
 			if toPolicy == nil || fromPolicy == nil {
 				return nil
 			}
-			nodeMap[hex.EncodeToString(toPolicy.ToNode[:])] = &models.Node{
-				PubKeyBytes: toPolicy.ToNode,
-			}
+			nodeMap[hex.EncodeToString(toPolicy.ToNode[:])] =
+				models.NewV1ShellNode(toPolicy.ToNode)
 			edges = append(edges, channelEdgeInfo)
 			if toPolicy != nil {
 				policies = append(policies, toPolicy)
