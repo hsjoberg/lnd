@@ -25,8 +25,8 @@ typedef struct CCallback {
 import "C"
 
 //export start
-func start(extraArgs *C.char, callback C.CCallback) {
-	Start(C.GoString(extraArgs), WrapCallbackCgo(callback))
+func start(extraArgs *C.char, callback *C.CCallback) {
+	Start(C.GoString(extraArgs), WrapCallbackCgo(*callback))
 }
 
 //export getStatus

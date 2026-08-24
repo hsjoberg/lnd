@@ -22,14 +22,15 @@ typedef struct CCallback {
 import "C"
 
 //export gossipSync
-func gossipSync(serviceUrl *C.char, cacheDir *C.char, dataDir *C.char, networkType *C.char, callback C.CCallback) {
+func gossipSync(serviceUrl *C.char, cacheDir *C.char, dataDir *C.char, networkType *C.char, callback *C.CCallback) {
 	goServiceUrl := C.GoString(serviceUrl)
 	goCacheDir := C.GoString(cacheDir)
 	goDataDir := C.GoString(dataDir)
 	goNetworkType := C.GoString(networkType)
+	goCallback := WrapCallbackCgo(*callback)
 
 	go func() {
-		GossipSync(goServiceUrl, goCacheDir, goDataDir, goNetworkType, WrapCallbackCgo(callback))
+		GossipSync(goServiceUrl, goCacheDir, goDataDir, goNetworkType, goCallback)
 	}()
 }
 
